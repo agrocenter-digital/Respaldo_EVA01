@@ -1,0 +1,37 @@
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${COGNITO_ISSUER_URI:https://cognito-idp.us-east-1.amazonaws.com/us-east-1_DBCBjL67J}
+          jwk-set-uri: ${COGNITO_JWK_SET_URI:https://cognito-idp.us-east-1.amazonaws.com/us-east-1_DBCBjL67J/.well-known/jwks.json}
+
+agrocenter:
+  security:
+    jwt:
+      issuer-uri: ${COGNITO_ISSUER_URI:https://cognito-idp.us-east-1.amazonaws.com/us-east-1_DBCBjL67J}
+      jwk-set-uri: ${COGNITO_JWK_SET_URI:https://cognito-idp.us-east-1.amazonaws.com/us-east-1_DBCBjL67J/.well-known/jwks.json}
+      audience: ${COGNITO_AUDIENCE:agrocenter-api}
+  cors:
+    allowed-origins: ${ALLOWED_ORIGINS:https://front-web-seven.vercel.app,http://localhost:3000,http://localhost:5173}
+    allowed-origin-patterns: ${ALLOWED_ORIGIN_PATTERNS:https://*.vercel.app}
+
+services:
+  inventory:
+    base-url: ${INVENTORY_SERVICE_URL:${MS_INVENTARIO_URL:http://internal-agrocenter-bff-alb:8080}}
+    connect-timeout: ${MS_INVENTARIO_CONNECT_TIMEOUT:5s}
+    response-timeout: ${MS_INVENTARIO_RESPONSE_TIMEOUT:10s}
+  sales:
+    base-url: ${SALES_SERVICE_URL:${MS_VENTAS_URL:http://internal-agrocenter-bff-alb:8080}}
+    connect-timeout: ${MS_VENTAS_CONNECT_TIMEOUT:5s}
+    response-timeout: ${MS_VENTAS_RESPONSE_TIMEOUT:20s}
+  purchases:
+    base-url: ${PURCHASES_SERVICE_URL:${MS_COMPRAS_URL:http://internal-agrocenter-bff-alb:8080}}
+    connect-timeout: ${MS_COMPRAS_CONNECT_TIMEOUT:5s}
+    response-timeout: ${MS_COMPRAS_RESPONSE_TIMEOUT:20s}
+
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false
