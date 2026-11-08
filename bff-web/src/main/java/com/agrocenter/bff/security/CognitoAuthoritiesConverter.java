@@ -25,12 +25,44 @@ public class CognitoAuthoritiesConverter implements Converter<Jwt, Collection<Gr
             authorities.addAll(scopes);
         }
 
-        List<String> groups = jwt.getClaimAsStringList("cognito:groups");
-        if (groups != null) {
-            groups.forEach(group -> addRole(authorities, group));
-        }
-        addRole(authorities, jwt.getClaimAsString("custom:role"));
+        // Extracción exhaustiva de claims de roles/grupos desde Cognito o IdPs
+        extractAndAddRoles(authorities, jwt, "cognito:groups");
+        extractAndAddRoles(authorities, jwt, "roles");
+        extractAndAddRoles(authorities, jwt, "role");
+        extractAndAddRoles(authorities, jwt, "groups");
+        extractAndAddRoles(authorities, jwt, "group");
+        extractAndAddRoles(authorities, jwt, "custom:role");
+        extractAndAddRoles(authorities, jwt, "authorities");
+
         return authorities;
+    }
+
+    private void extractAndAddRoles(Set<GrantedAuthority> authorities, Jwt jwt, String claimName) {
+        Object claimValue = jwt.getClaims().get(claimName);
+        if (claimValue == null) {
+            return;
+        }
+        if (claimValue instanceof Collection<?> collection) {
+            for (Object item : collection) {
+                if (item != null) {
+                    addRole(authorities, item.toString());
+                }
+            }
+        } else if (claimValue instanceof Object[] array) {
+            for (Object item : array) {
+                if (item != null) {
+                    addRole(authorities, item.toString());
+                }
+            }
+        } else if (claimValue instanceof String str) {
+            String trimmed = str.trim();
+            if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+                trimmed = trimmed.substring(1, trimmed.length() - 1);
+            }
+            for (String part : trimmed.split("[,\\s]+")) {
+                addRole(authorities, part.replace("\"", "").replace("'", "").trim());
+            }
+        }
     }
 
     private void addRole(Set<GrantedAuthority> authorities, String role) {

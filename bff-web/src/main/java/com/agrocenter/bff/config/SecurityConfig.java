@@ -55,8 +55,19 @@ public class SecurityConfig {
                         // Preflights de CORS para el navegador
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
 
-                        // Rutas administrativas (exigen explícitamente ROLE_ADMIN)
-                        .requestMatchers("/api/bff/admin/**", "/api/bff/inventario/**", "/api/bff/compras/**").hasAuthority("ROLE_ADMIN")
+                        // Rutas de mutación de inventario (permite por rol administrativo o scope write)
+                        .requestMatchers(HttpMethod.POST, "/api/bff/inventario/**", "/api/bff/admin/inventario/**")
+                                .hasAnyAuthority("ROLE_ADMIN", "ADMIN", "SCOPE_inventario.stock.write")
+                        .requestMatchers(HttpMethod.PUT, "/api/bff/inventario/**", "/api/bff/admin/inventario/**")
+                                .hasAnyAuthority("ROLE_ADMIN", "ADMIN", "SCOPE_inventario.stock.write")
+                        .requestMatchers(HttpMethod.PATCH, "/api/bff/inventario/**", "/api/bff/admin/inventario/**")
+                                .hasAnyAuthority("ROLE_ADMIN", "ADMIN", "SCOPE_inventario.stock.write")
+                        .requestMatchers(HttpMethod.DELETE, "/api/bff/inventario/**", "/api/bff/admin/inventario/**")
+                                .hasAnyAuthority("ROLE_ADMIN", "ADMIN", "SCOPE_inventario.stock.write")
+
+                        // Rutas administrativas generales
+                        .requestMatchers("/api/bff/admin/**", "/api/bff/inventario/**", "/api/bff/compras/**")
+                                .hasAnyAuthority("ROLE_ADMIN", "ADMIN", "SCOPE_inventario.stock.read", "SCOPE_inventario.stock.write")
 
                         // Todo lo demás exige autenticación
                         .anyRequest().authenticated()

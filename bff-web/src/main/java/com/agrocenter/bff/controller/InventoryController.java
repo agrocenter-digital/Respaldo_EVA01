@@ -32,7 +32,7 @@ import java.util.List;
 @Validated
 @RestController
 @RequestMapping({"/api/bff/inventario", "/api/bff/admin/inventario"})
-@PreAuthorize("hasRole('ADMIN')")
+@PreAuthorize("hasAnyRole('ADMIN', 'ROLE_ADMIN') or hasAnyAuthority('ROLE_ADMIN', 'ADMIN', 'SCOPE_inventario.stock.read', 'SCOPE_inventario.stock.write')")
 public class InventoryController {
 
     private final InventoryClient inventoryClient;
@@ -58,6 +58,7 @@ public class InventoryController {
     }
 
     @PostMapping("/productos")
+    @PreAuthorize("hasAnyRole('ADMIN', 'ROLE_ADMIN') or hasAnyAuthority('ROLE_ADMIN', 'ADMIN', 'SCOPE_inventario.stock.write')")
     public ResponseEntity<ProductResponse> createProduct(
             @Valid @RequestBody ProductCreateRequest request
     ) {

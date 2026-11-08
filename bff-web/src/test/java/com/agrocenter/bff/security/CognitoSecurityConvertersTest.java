@@ -30,6 +30,18 @@ class CognitoSecurityConvertersTest {
     }
 
     @Test
+    void mapsRolesAndAlternativeClaims() {
+        Jwt jwt = jwtBuilder()
+                .claim("roles", List.of("ROLE_ADMIN"))
+                .claim("groups", "ADMIN")
+                .build();
+
+        assertThat(new CognitoAuthoritiesConverter().convert(jwt))
+                .extracting(Object::toString)
+                .containsExactly("ROLE_ADMIN");
+    }
+
+    @Test
     void validatesAudienceOrCognitoClientId() {
         CognitoAudienceValidator validator = new CognitoAudienceValidator("web-client-id");
 
