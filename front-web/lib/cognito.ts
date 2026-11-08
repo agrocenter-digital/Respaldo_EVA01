@@ -55,8 +55,48 @@ export function getStoredSession(): AuthSession {
   };
 }
 
-/** En modo demo siempre existe una sesión de administrador. */
+/** En modo demo o handoff de sesión: adopta token por query string, storage o mock fallback. */
 export function readAuthSession(): AuthSession | null {
+  if (typeof window !== "undefined") {
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const incomingToken = urlParams.get("token") || urlParams.get("accessToken");
+      if (incomingToken) {
+        const claims = decodeClaims(incomingToken);
+        const adoptedSession: AuthSession = {
+          isAuthenticated: true,
+          accessToken: incomingToken,
+          idToken: urlParams.get("idToken") || incomingToken,
+          name: (claims["cognito:username"] || claims["name"] || claims["email"] || "Administrador AgroCenter") as string,
+          role: "ROLE_ADMIN",
+          email: (claims["email"] || "admin@agrocenter.local") as string,
+          demo: false,
+          groups: (Array.isArray(claims["cognito:groups"]) ? claims["cognito:groups"] : ["ROLE_ADMIN"]) as string[],
+        };
+        sessionStorage.setItem(SESSION_KEY, JSON.stringify(adoptedSession));
+        localStorage.setItem(SESSION_KEY, JSON.stringify(adoptedSession));
+        // Limpiar parámetros de la URL sin recargar la página
+        urlParams.delete("token");
+        urlParams.delete("accessToken");
+        urlParams.delete("idToken");
+        const cleanSearch = urlParams.toString();
+        const cleanUrl = window.location.pathname + (cleanSearch ? `?${cleanSearch}` : "");
+        window.history.replaceState({}, "", cleanUrl);
+        return adoptedSession;
+      }
+
+      // Si no viene en URL, verificar si ya fue adoptado en storage
+      const stored = sessionStorage.getItem(SESSION_KEY) || localStorage.getItem(SESSION_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored) as AuthSession;
+        if (parsed?.accessToken) {
+          return parsed;
+        }
+      }
+    } catch {
+      // Ignorar errores de parsing y usar mock fallback
+    }
+  }
   return getStoredSession();
 }
 
