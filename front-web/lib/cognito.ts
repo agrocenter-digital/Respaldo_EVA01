@@ -55,43 +55,140 @@ export function getStoredSession(): AuthSession {
   };
 }
 
-/** En modo demo o handoff de sesión: adopta token por query string, storage o mock fallback. */
+/**
+ * Extrae un token Bearer/JWT desde una instancia de Storage (sessionStorage o localStorage)
+ * soportando tanto JSON serializado como cadenas de texto planas.
+ */
+function extractTokenFromStorage(storage: Storage): string | null {
+  const candidateKeys = [
+    SESSION_KEY,
+    "accessToken",
+    "access_token",
+    "token",
+    "jwt",
+    "auth_token",
+    "idToken",
+    "id_token",
+  ];
+
+  for (const key of candidateKeys) {
+    try {
+      const raw = storage.getItem(key);
+      if (!raw) continue;
+      const trimmed = raw.trim();
+      if (!trimmed) continue;
+
+      // 1. Si está serializado en JSON (e.g. objeto AuthSession o { token: "..." })
+      if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+        const parsed = JSON.parse(trimmed);
+        const candidate =
+          parsed.accessToken ||
+          parsed.access_token ||
+          parsed.token ||
+          parsed.jwt ||
+          parsed.idToken ||
+          parsed.id_token;
+        if (typeof candidate === "string" && candidate.trim().length > 10) {
+          return candidate.trim().replace(/^Bearer\s+/i, "");
+        }
+      }
+
+      // 2. Si está almacenado como string plano (e.g. JWT "eyJ...")
+      if (trimmed.length > 10 && !trimmed.startsWith("{")) {
+        return trimmed.replace(/^Bearer\s+/i, "").replace(/^"|"$/g, "");
+      }
+    } catch {
+      // Ignorar entradas inválidas y continuar probando siguientes claves
+    }
+  }
+  return null;
+}
+
+/**
+ * Guarda y adopta un token JWT en sessionStorage y localStorage.
+ */
+export function saveAuthToken(rawToken: string): AuthSession {
+  const cleanToken = rawToken.trim().replace(/^Bearer\s+/i, "").replace(/^"|"$/g, "");
+  const claims = decodeClaims(cleanToken);
+  const adoptedSession: AuthSession = {
+    isAuthenticated: true,
+    accessToken: cleanToken,
+    idToken: cleanToken,
+    name: (claims["cognito:username"] || claims["name"] || claims["email"] || claims["sub"] || "Administrador AgroCenter") as string,
+    role: "ROLE_ADMIN",
+    email: (claims["email"] || claims["sub"] || "admin@agrocenter.local") as string,
+    demo: false,
+    groups: (Array.isArray(claims["cognito:groups"]) && claims["cognito:groups"].length > 0
+      ? (claims["cognito:groups"] as string[])
+      : ["ROLE_ADMIN"]),
+  };
+
+  if (typeof window !== "undefined") {
+    try {
+      const serialized = JSON.stringify(adoptedSession);
+      sessionStorage.setItem(SESSION_KEY, serialized);
+      localStorage.setItem(SESSION_KEY, serialized);
+      sessionStorage.setItem("accessToken", cleanToken);
+      localStorage.setItem("accessToken", cleanToken);
+    } catch {
+      // Storage no disponible o cuota excedida
+    }
+  }
+
+  return adoptedSession;
+}
+
+/** En modo demo o handoff de sesión: adopta token por query string, hash fragment, storage o mock fallback. */
 export function readAuthSession(): AuthSession | null {
   if (typeof window !== "undefined") {
     try {
+      // 1. Buscar en Query String (?token=... o ?access_token=... o ?accessToken=...)
       const urlParams = new URLSearchParams(window.location.search);
-      const incomingToken = urlParams.get("token") || urlParams.get("accessToken");
+      let incomingToken =
+        urlParams.get("token") ||
+        urlParams.get("accessToken") ||
+        urlParams.get("access_token") ||
+        urlParams.get("jwt") ||
+        urlParams.get("idToken") ||
+        urlParams.get("id_token");
+
+      // 2. Si no está en query string, buscar en Hash fragment (#access_token=... o #token=...)
+      if (!incomingToken && window.location.hash) {
+        const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+        incomingToken =
+          hashParams.get("token") ||
+          hashParams.get("access_token") ||
+          hashParams.get("accessToken") ||
+          hashParams.get("jwt") ||
+          hashParams.get("id_token") ||
+          hashParams.get("idToken");
+      }
+
       if (incomingToken) {
-        const claims = decodeClaims(incomingToken);
-        const adoptedSession: AuthSession = {
-          isAuthenticated: true,
-          accessToken: incomingToken,
-          idToken: urlParams.get("idToken") || incomingToken,
-          name: (claims["cognito:username"] || claims["name"] || claims["email"] || "Administrador AgroCenter") as string,
-          role: "ROLE_ADMIN",
-          email: (claims["email"] || "admin@agrocenter.local") as string,
-          demo: false,
-          groups: (Array.isArray(claims["cognito:groups"]) ? claims["cognito:groups"] : ["ROLE_ADMIN"]) as string[],
-        };
-        sessionStorage.setItem(SESSION_KEY, JSON.stringify(adoptedSession));
-        localStorage.setItem(SESSION_KEY, JSON.stringify(adoptedSession));
+        const adopted = saveAuthToken(incomingToken);
+
         // Limpiar parámetros de la URL sin recargar la página
         urlParams.delete("token");
         urlParams.delete("accessToken");
+        urlParams.delete("access_token");
+        urlParams.delete("jwt");
         urlParams.delete("idToken");
+        urlParams.delete("id_token");
         const cleanSearch = urlParams.toString();
         const cleanUrl = window.location.pathname + (cleanSearch ? `?${cleanSearch}` : "");
         window.history.replaceState({}, "", cleanUrl);
-        return adoptedSession;
+        return adopted;
       }
 
-      // Si no viene en URL, verificar si ya fue adoptado en storage
-      const stored = sessionStorage.getItem(SESSION_KEY) || localStorage.getItem(SESSION_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored) as AuthSession;
-        if (parsed?.accessToken) {
-          return parsed;
-        }
+      // 3. Si no viene en URL, verificar exhaustivamente en sessionStorage y localStorage
+      const tokenFromSession = extractTokenFromStorage(sessionStorage);
+      if (tokenFromSession) {
+        return saveAuthToken(tokenFromSession);
+      }
+
+      const tokenFromLocal = extractTokenFromStorage(localStorage);
+      if (tokenFromLocal) {
+        return saveAuthToken(tokenFromLocal);
       }
     } catch {
       // Ignorar errores de parsing y usar mock fallback

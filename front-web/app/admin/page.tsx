@@ -31,9 +31,15 @@ import {
   User,
   X,
   XCircle,
+  Key,
 } from "lucide-react";
-import { AuthSession, isUserAdmin, readAuthSession } from "@/lib/cognito";
-import { apiRequest } from "@/lib/api";
+import { AuthSession, isUserAdmin, readAuthSession, saveAuthToken } from "@/lib/cognito";
+import { apiRequest, HttpError, API_BASE_URL } from "@/lib/api";
+
+type FeedbackAlert = {
+  type: "success" | "error" | "warning";
+  message: string;
+} | null;
 
 type ApiEndpoint = {
   id: string;
@@ -275,9 +281,13 @@ export default function AdminPage() {
   // Inventory Manager State (ms-inventario)
   const [products, setProducts] = useState<ProductAdmin[]>(fallbackInitialProducts);
   const [isLoadingProducts, setIsLoadingProducts] = useState(false);
-  const [productFeedback, setProductFeedback] = useState<string | null>(null);
+  const [inventoryError, setInventoryError] = useState<string | null>(null);
+  const [productFeedback, setProductFeedback] = useState<FeedbackAlert>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
+  const [createProductError, setCreateProductError] = useState<string | null>(null);
   const [editingProduct, setEditingProduct] = useState<ProductAdmin | null>(null);
+  const [showTokenModal, setShowTokenModal] = useState(false);
+  const [customTokenInput, setCustomTokenInput] = useState("");
 
   // Sales State (ms-ventas)
   const [sales, setSales] = useState<SaleAdmin[]>(fallbackInitialSales);
@@ -392,31 +402,33 @@ export default function AdminPage() {
   // Cargar lista de productos desde el backend (ms-inventario)
   async function loadInventory(activeSession: AuthSession | null) {
     setIsLoadingProducts(true);
+    setInventoryError(null);
     try {
       const endpoint = isUserAdmin(activeSession) ? "/api/bff/admin/inventario" : "/api/bff/catalogo";
       let data: any;
       try {
         data = await apiRequest<any>(endpoint);
-      } catch {
+      } catch (firstErr: unknown) {
+        // Fallback al endpoint alternativo de inventario si el primero responde 404
         data = await apiRequest<any>("/api/bff/inventario");
       }
       const items = Array.isArray(data) ? data : data?.content || data?.contenido || [];
-      if (items.length > 0) {
-        const mapped: ProductAdmin[] = items.map((p: any) => ({
-          id: p.id,
-          sku: p.sku || `SKU-${p.id}`,
-          nombre: p.nombre || p.name || "Producto sin nombre",
-          categoria: p.categoria || p.category || "General",
-          descripcion: p.descripcion || p.description || "",
-          precioVenta: p.precioVenta ?? p.precio ?? p.price ?? 0,
-          stockActual: p.stockActual ?? p.stock ?? 0,
-          stockMinimo: p.stockMinimo ?? 5,
-          activo: p.activo ?? true,
-        }));
-        setProducts(mapped);
-      }
+      const mapped: ProductAdmin[] = items.map((p: any) => ({
+        id: p.id,
+        sku: p.sku || `SKU-${p.id}`,
+        nombre: p.nombre || p.name || "Producto sin nombre",
+        categoria: p.categoria || p.category || "General",
+        descripcion: p.descripcion || p.description || "",
+        precioVenta: Number(p.precioVenta ?? p.precio ?? p.price ?? 0),
+        stockActual: Number(p.stockActual ?? p.stock ?? 0),
+        stockMinimo: Number(p.stockMinimo ?? 5),
+        activo: p.activo ?? true,
+      }));
+      setProducts(mapped);
     } catch (err: unknown) {
-      console.warn("Utilizando datos iniciales de inventario debido a:", err);
+      console.error("Error al cargar inventario desde backend/PostgreSQL:", err);
+      const msg = err instanceof Error ? err.message : "Error de comunicación con ms-inventario";
+      setInventoryError(msg);
     } finally {
       setIsLoadingProducts(false);
     }
@@ -496,31 +508,89 @@ export default function AdminPage() {
     }
   }
 
-  // Crear nuevo producto en el catálogo
+  // Crear nuevo producto en el catálogo (POST /api/bff/inventario/productos)
   async function handleCreateProduct(e: FormEvent) {
     e.preventDefault();
-    setIsCreatingProduct(true);
+    setCreateProductError(null);
     setProductFeedback(null);
 
+    // Sanitización y validación estricta según ProductCreateRequest DTO
+    const skuClean = newSku.trim().toUpperCase();
+    const nombreClean = newNombre.trim();
+    const categoriaClean = newCategoria.trim() || "Semillas";
+    const descripcionClean = newDescripcion.trim();
+    const precioVentaNum = Number(newPrecio);
+    const stockMinimoNum = Number(newStockMinimo);
+    const stockActualNum = Number(newStock);
+
+    if (!skuClean) {
+      setCreateProductError("El campo SKU es obligatorio (ej. FERT-SULF-003).");
+      return;
+    }
+    if (!nombreClean) {
+      setCreateProductError("El nombre comercial es obligatorio.");
+      return;
+    }
+    if (isNaN(precioVentaNum) || precioVentaNum < 0) {
+      setCreateProductError("El precio de venta debe ser un número mayor o igual a 0.");
+      return;
+    }
+    if (isNaN(stockMinimoNum) || stockMinimoNum < 0) {
+      setCreateProductError("El stock mínimo debe ser un número entero mayor o igual a 0.");
+      return;
+    }
+    if (isNaN(stockActualNum) || stockActualNum < 0) {
+      setCreateProductError("El stock inicial debe ser un número entero mayor o igual a 0.");
+      return;
+    }
+
+    // Payload que coincide 1:1 con ProductCreateRequest (BFF) y ProductoCreateRequest (ms-inventario)
     const payload = {
-      sku: newSku.trim().toUpperCase(),
-      nombre: newNombre.trim(),
-      categoria: newCategoria,
-      descripcion: newDescripcion.trim(),
-      precioVenta: Number(newPrecio),
-      stockMinimo: Number(newStockMinimo),
-      stockActual: Number(newStock),
+      sku: skuClean,
+      nombre: nombreClean,
+      categoria: categoriaClean,
+      descripcion: descripcionClean,
+      precioVenta: Math.round(precioVentaNum * 100) / 100,
+      stockMinimo: Math.floor(stockMinimoNum),
+      stockActual: Math.floor(stockActualNum),
     };
 
+    setIsCreatingProduct(true);
+
     try {
+      const activeSession = session || readAuthSession();
+      const token = activeSession?.accessToken || activeSession?.idToken;
+
       const created = await apiRequest<any>("/api/bff/inventario/productos", {
         method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token.replace(/^Bearer\s+/i, "").trim()}` } : {}),
+        },
         body: JSON.stringify(payload),
       });
 
+      // Mapear el nuevo producto retornado por el backend y añadirlo de inmediato a la lista
+      const newProductItem: ProductAdmin = {
+        id: created?.id ?? Date.now(),
+        sku: created?.sku || payload.sku,
+        nombre: created?.nombre || payload.nombre,
+        categoria: created?.categoria || payload.categoria,
+        descripcion: created?.descripcion || payload.descripcion,
+        precioVenta: Number(created?.precioVenta ?? payload.precioVenta),
+        stockActual: Number(created?.stockActual ?? payload.stockActual),
+        stockMinimo: Number(created?.stockMinimo ?? payload.stockMinimo),
+        activo: created?.activo ?? true,
+      };
+
+      setProducts((prev) => [newProductItem, ...prev.filter((p) => p.sku !== newProductItem.sku)]);
       setShowCreateModal(false);
-      setProductFeedback(`Producto ${payload.sku} creado exitosamente en la base de datos.`);
-      // Reset form
+      setProductFeedback({
+        type: "success",
+        message: `Insumo ${payload.sku} (${payload.nombre}) persistido exitosamente en PostgreSQL (RDS).`,
+      });
+
+      // Resetear inputs del formulario
       setNewSku("");
       setNewNombre("");
       setNewDescripcion("");
@@ -528,13 +598,26 @@ export default function AdminPage() {
       setNewStock(20);
       setNewStockMinimo(5);
 
-      // Recargar lista directamente de PostgreSQL
-      await loadInventory(session || readAuthSession());
+      // Sincronizar catálogo completo en background
+      await loadInventory(activeSession);
     } catch (err: unknown) {
       console.error("Error al persistir producto en PostgreSQL:", err);
-      // En caso de fallo de red/seguridad, notificar claramente
-      setShowCreateModal(false);
-      setProductFeedback(`Error al persistir ${payload.sku}: ${err instanceof Error ? err.message : "Error desconocido"}`);
+      let errorMsg = err instanceof Error ? err.message : "Error desconocido de red";
+      if (err instanceof HttpError) {
+        if (err.status === 401) {
+          errorMsg = "Error 401 Unauthorized: El token de autenticación no es válido o ha expirado. Verifica las credenciales.";
+        } else if (err.status === 403) {
+          errorMsg = "Error 403 Forbidden: Se requiere el rol ROLE_ADMIN en el token JWT para crear insumos.";
+        } else if (err.status === 400) {
+          errorMsg = `Error 400 Bad Request: ${err.message}`;
+        }
+      }
+      // Mantener abierto el modal para que el usuario no pierda los datos ingresados
+      setCreateProductError(errorMsg);
+      setProductFeedback({
+        type: "error",
+        message: `Fallo al registrar ${payload.sku}: ${errorMsg}`,
+      });
     } finally {
       setIsCreatingProduct(false);
     }
@@ -566,11 +649,18 @@ export default function AdminPage() {
         }),
       });
       setProducts((prev) => prev.map((p) => (p.id === editingProduct.id ? updated : p)));
-      setProductFeedback(`Producto ${editingProduct.sku} actualizado correctamente en la base de datos.`);
+      setProductFeedback({
+        type: "success",
+        message: `Producto ${editingProduct.sku} actualizado correctamente en PostgreSQL.`,
+      });
       await loadInventory(session || readAuthSession());
     } catch (err: unknown) {
       console.error("Error al actualizar producto en PostgreSQL:", err);
-      setProductFeedback(`Error al actualizar ${editingProduct.sku}: ${err instanceof Error ? err.message : "Error desconocido"}`);
+      const msg = err instanceof Error ? err.message : "Error desconocido";
+      setProductFeedback({
+        type: "error",
+        message: `Error al actualizar ${editingProduct.sku}: ${msg}`,
+      });
     } finally {
       setIsSavingEdit(false);
       setEditingProduct(null);
@@ -773,9 +863,35 @@ export default function AdminPage() {
                     Panel RDS & APIs
                   </span>
                 </strong>
-                <small style={{ color: "var(--muted)", fontSize: 11, display: "block" }}>
-                  Operador: {session?.name || "Administrador Demo"} · Rol: {session?.role || "ADMIN"}
-                </small>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2 }}>
+                  <small style={{ color: "var(--muted)", fontSize: 11 }}>
+                    Operador: {session?.name || "Administrador Demo"} · Rol: {session?.role || "ADMIN"}
+                  </small>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCustomTokenInput(session?.accessToken || "");
+                      setShowTokenModal(true);
+                    }}
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 4,
+                      fontSize: 10,
+                      fontWeight: 700,
+                      padding: "1px 6px",
+                      borderRadius: 4,
+                      background: session?.accessToken ? "#e0f2fe" : "#fef3c7",
+                      color: session?.accessToken ? "#0369a1" : "#92400e",
+                      border: "none",
+                      cursor: "pointer",
+                    }}
+                    title="Ver o inyectar Token Bearer para peticiones API"
+                  >
+                    <Key size={10} />
+                    {session?.accessToken ? "JWT Bearer Activo" : "Sin Token"}
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -909,10 +1025,26 @@ export default function AdminPage() {
           <div
             style={{
               padding: "12px 18px",
-              background: "var(--green-100)",
-              border: "1px solid #c4dec9",
+              background:
+                productFeedback.type === "error"
+                  ? "#fee2e2"
+                  : productFeedback.type === "warning"
+                  ? "#fef3c7"
+                  : "var(--green-100)",
+              border: `1px solid ${
+                productFeedback.type === "error"
+                  ? "#fca5a5"
+                  : productFeedback.type === "warning"
+                  ? "#fde68a"
+                  : "#c4dec9"
+              }`,
               borderRadius: 8,
-              color: "var(--green-950)",
+              color:
+                productFeedback.type === "error"
+                  ? "#991b1b"
+                  : productFeedback.type === "warning"
+                  ? "#92400e"
+                  : "var(--green-950)",
               fontSize: 13,
               fontWeight: 600,
               marginBottom: 20,
@@ -922,12 +1054,18 @@ export default function AdminPage() {
             }}
           >
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <CheckCircle2 size={18} color="var(--green-700)" />
-              <span>{productFeedback}</span>
+              {productFeedback.type === "error" ? (
+                <XCircle size={18} color="#dc2626" />
+              ) : productFeedback.type === "warning" ? (
+                <AlertTriangle size={18} color="#d97706" />
+              ) : (
+                <CheckCircle2 size={18} color="var(--green-700)" />
+              )}
+              <span>{productFeedback.message}</span>
             </div>
             <button
               onClick={() => setProductFeedback(null)}
-              style={{ background: "transparent", border: "none", cursor: "pointer", color: "var(--muted)" }}
+              style={{ background: "transparent", border: "none", cursor: "pointer", color: "inherit" }}
             >
               <X size={16} />
             </button>
@@ -1512,6 +1650,47 @@ export default function AdminPage() {
               )}
             </div>
 
+            {/* Alerta de Error de Sincronización con PostgreSQL */}
+            {activeTab === "inventory" && inventoryError && (
+              <div
+                style={{
+                  padding: "12px 16px",
+                  background: "#fef2f2",
+                  border: "1px solid #fecaca",
+                  borderRadius: 10,
+                  marginBottom: 14,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  color: "#991b1b",
+                  fontSize: 13,
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <AlertTriangle size={18} color="#dc2626" />
+                  <span>
+                    <strong>Advertencia de conexión con ms-inventario/PostgreSQL:</strong> {inventoryError}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => loadInventory(session || readAuthSession())}
+                  style={{
+                    padding: "6px 12px",
+                    background: "#dc2626",
+                    color: "#fff",
+                    border: "none",
+                    borderRadius: 6,
+                    fontSize: 12,
+                    fontWeight: 700,
+                    cursor: "pointer",
+                  }}
+                >
+                  Reintentar sincronización
+                </button>
+              </div>
+            )}
+
             {/* 1. TABLA INVENTARIO */}
             {activeTab === "inventory" && (
               <div
@@ -2049,12 +2228,36 @@ export default function AdminPage() {
                 Registrar Nuevo Insumo Agrícola
               </h3>
               <button
-                onClick={() => setShowCreateModal(false)}
+                onClick={() => {
+                  setShowCreateModal(false);
+                  setCreateProductError(null);
+                }}
                 style={{ background: "transparent", border: "none", cursor: "pointer", color: "var(--muted)" }}
               >
                 <X size={20} />
               </button>
             </div>
+
+            {createProductError && (
+              <div
+                style={{
+                  padding: "10px 14px",
+                  background: "#fee2e2",
+                  border: "1px solid #fca5a5",
+                  borderRadius: 8,
+                  color: "#991b1b",
+                  fontSize: 12,
+                  fontWeight: 600,
+                  display: "flex",
+                  alignItems: "flex-start",
+                  gap: 8,
+                  marginBottom: 10,
+                }}
+              >
+                <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 1, color: "#dc2626" }} />
+                <span>{createProductError}</span>
+              </div>
+            )}
 
             <form onSubmit={handleCreateProduct} style={{ display: "flex", flexDirection: "column", gap: 14 }}>
               <div>
@@ -2265,6 +2468,146 @@ export default function AdminPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+      {/* MODAL: GESTIÓN DE SESIÓN Y TOKEN JWT */}
+      {showTokenModal && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(10, 35, 25, 0.6)",
+            display: "grid",
+            placeItems: "center",
+            zIndex: 55,
+            padding: 16,
+          }}
+        >
+          <div
+            style={{
+              background: "var(--surface)",
+              borderRadius: 14,
+              padding: 24,
+              width: "min(560px, 100%)",
+              boxShadow: "var(--shadow-lg)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 14 }}>
+              <h3 style={{ fontSize: 17, fontWeight: 700, margin: 0, color: "var(--green-950)", display: "flex", alignItems: "center", gap: 8 }}>
+                <Key size={18} color="var(--green-700)" />
+                Token Bearer & Sesión de Administrador
+              </h3>
+              <button
+                onClick={() => setShowTokenModal(false)}
+                style={{ background: "transparent", border: "none", cursor: "pointer", color: "var(--muted)" }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <p style={{ fontSize: 13, color: "var(--ink-soft)", margin: "0 0 14px 0", lineHeight: 1.5 }}>
+              Todas las llamadas del cliente web al BFF inyectan automáticamente este token en la cabecera{" "}
+              <code style={{ background: "#f0f4f1", padding: "2px 6px", borderRadius: 4, fontFamily: "monospace" }}>
+                Authorization: Bearer &lt;token&gt;
+              </code>
+              . Puedes pegar un token de prueba generado en EC2 para sincronizar la interfaz.
+            </p>
+
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ display: "block", fontSize: 12, fontWeight: 700, marginBottom: 4 }}>
+                Token JWT (Bearer Token)
+              </label>
+              <textarea
+                value={customTokenInput}
+                onChange={(e) => setCustomTokenInput(e.target.value)}
+                placeholder="Pega aquí el token JWT (eyJ...)"
+                rows={5}
+                style={{
+                  width: "100%",
+                  padding: "8px 12px",
+                  borderRadius: 6,
+                  border: "1px solid var(--line)",
+                  fontSize: 12,
+                  fontFamily: "monospace",
+                  lineHeight: 1.4,
+                  wordBreak: "break-all",
+                }}
+              />
+            </div>
+
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+              <button
+                type="button"
+                onClick={() => {
+                  const current = session?.accessToken || "";
+                  if (current && typeof navigator !== "undefined" && navigator.clipboard) {
+                    navigator.clipboard.writeText(current);
+                    setCopySuccess(true);
+                    setTimeout(() => setCopySuccess(false), 2000);
+                  }
+                }}
+                style={{
+                  padding: "8px 14px",
+                  borderRadius: 6,
+                  border: "1px solid var(--line)",
+                  background: "transparent",
+                  cursor: "pointer",
+                  fontSize: 12,
+                  fontWeight: 600,
+                  display: "inline-flex",
+                  alignItems: "center",
+                  gap: 6,
+                }}
+              >
+                <Copy size={14} />
+                {copySuccess ? "Copiado!" : "Copiar Token Actual"}
+              </button>
+
+              <div style={{ display: "flex", gap: 10 }}>
+                <button
+                  type="button"
+                  onClick={() => setShowTokenModal(false)}
+                  style={{
+                    padding: "8px 14px",
+                    borderRadius: 6,
+                    border: "1px solid var(--line)",
+                    background: "transparent",
+                    cursor: "pointer",
+                    fontSize: 12,
+                  }}
+                >
+                  Cerrar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (customTokenInput.trim()) {
+                      const updated = saveAuthToken(customTokenInput.trim());
+                      setSession(updated);
+                      setShowTokenModal(false);
+                      setProductFeedback({
+                        type: "success",
+                        message: "Token Bearer adoptado y persistido correctamente en sessionStorage/localStorage.",
+                      });
+                      loadInventory(updated);
+                    }
+                  }}
+                  style={{
+                    padding: "8px 16px",
+                    borderRadius: 6,
+                    border: "none",
+                    background: "var(--green-700)",
+                    color: "#fff",
+                    fontWeight: 700,
+                    cursor: "pointer",
+                    fontSize: 12,
+                  }}
+                >
+                  Guardar & Aplicar Token
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

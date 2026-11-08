@@ -1,10 +1,24 @@
 import { readAuthSession } from "./cognito";
 
-const API_BASE_URL = (
+export const API_BASE_URL = (
   process.env.NEXT_PUBLIC_API_BASE_URL ||
   process.env.NEXT_PUBLIC_API_URL ||
   ""
 ).replace(/\/$/, "");
+
+export class HttpError extends Error {
+  status: number;
+  data: any;
+  responseBody?: string;
+
+  constructor(message: string, status: number, data?: any, responseBody?: string) {
+    super(message);
+    this.name = "HttpError";
+    this.status = status;
+    this.data = data;
+    this.responseBody = responseBody;
+  }
+}
 
 export async function apiRequest<T>(
   endpoint: string,
@@ -17,9 +31,10 @@ export async function apiRequest<T>(
   };
 
   // Se prioriza el accessToken requerido por los Resource Servers (CognitoTokenUseValidator exige token_use: "access")
-  const token = session?.accessToken || session?.idToken;
-  if (token) {
-    headers["Authorization"] = `Bearer ${token}`;
+  const rawToken = session?.accessToken || session?.idToken;
+  const cleanToken = rawToken ? rawToken.replace(/^Bearer\s+/i, "").trim() : "";
+  if (cleanToken && !headers["Authorization"] && !headers["authorization"]) {
+    headers["Authorization"] = `Bearer ${cleanToken}`;
   }
 
   // Garantizar idempotency-key para solicitudes POST hacia el BFF si no viene provista
@@ -32,19 +47,53 @@ export async function apiRequest<T>(
   }
 
   const cleanEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
-  const response = await fetch(`${API_BASE_URL}${cleanEndpoint}`, {
+  const targetUrl = `${API_BASE_URL}${cleanEndpoint}`;
+  const response = await fetch(targetUrl, {
     ...options,
     headers,
   });
 
   if (!response.ok) {
-    const errorData = await response.json().catch(() => null);
-    const errorMessage =
-      errorData?.message ||
-      errorData?.error ||
-      `Error ${response.status}: ${response.statusText || "Forbidden"}`;
-    throw new Error(errorMessage);
+    const errorBody = await response.text();
+    let errorMessage = `Error HTTP ${response.status} (${response.statusText || "Error"})`;
+    let parsedData: any = null;
+
+    try {
+      parsedData = JSON.parse(errorBody);
+      if (Array.isArray(parsedData?.errors) && parsedData.errors.length > 0) {
+        const fieldErrors = parsedData.errors
+          .map((e: any) => (e.field ? `${e.field}: ${e.defaultMessage || e.message}` : e.defaultMessage || e.message))
+          .join(" | ");
+        errorMessage = `Error de validación (${response.status}): ${fieldErrors}`;
+      } else {
+        errorMessage =
+          parsedData?.message ||
+          parsedData?.error ||
+          parsedData?.detail ||
+          errorMessage;
+      }
+    } catch {
+      if (errorBody && errorBody.length < 300) {
+        errorMessage = `Error HTTP ${response.status}: ${errorBody}`;
+      }
+    }
+
+    throw new HttpError(errorMessage, response.status, parsedData, errorBody);
   }
 
-  return response.json() as Promise<T>;
+  // Si la respuesta es 204 No Content o no tiene body
+  if (response.status === 204) {
+    return null as T;
+  }
+
+  const text = await response.text();
+  if (!text || text.trim() === "") {
+    return null as T;
+  }
+
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return text as unknown as T;
+  }
 }
