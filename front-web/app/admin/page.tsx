@@ -509,6 +509,7 @@ export default function AdminPage() {
       descripcion: newDescripcion.trim(),
       precioVenta: Number(newPrecio),
       stockMinimo: Number(newStockMinimo),
+      stockActual: Number(newStock),
     };
 
     try {
@@ -517,19 +518,6 @@ export default function AdminPage() {
         body: JSON.stringify(payload),
       });
 
-      const newProduct: ProductAdmin = {
-        id: created?.id || Date.now(),
-        sku: created?.sku || payload.sku,
-        nombre: created?.nombre || payload.nombre,
-        categoria: created?.categoria || payload.categoria,
-        descripcion: created?.descripcion || payload.descripcion,
-        precioVenta: created?.precioVenta || payload.precioVenta,
-        stockActual: Number(newStock),
-        stockMinimo: created?.stockMinimo || payload.stockMinimo,
-        activo: true,
-      };
-
-      setProducts((prev) => [newProduct, ...prev]);
       setShowCreateModal(false);
       setProductFeedback(`Producto ${payload.sku} creado exitosamente en la base de datos.`);
       // Reset form
@@ -539,22 +527,14 @@ export default function AdminPage() {
       setNewPrecio(10000);
       setNewStock(20);
       setNewStockMinimo(5);
+
+      // Recargar lista directamente de PostgreSQL
+      await loadInventory(session || readAuthSession());
     } catch (err: unknown) {
-      // En modo demostrativo / fallback
-      const localProduct: ProductAdmin = {
-        id: Date.now(),
-        sku: payload.sku,
-        nombre: payload.nombre,
-        categoria: payload.categoria,
-        descripcion: payload.descripcion,
-        precioVenta: payload.precioVenta,
-        stockActual: Number(newStock),
-        stockMinimo: payload.stockMinimo,
-        activo: true,
-      };
-      setProducts((prev) => [localProduct, ...prev]);
+      console.error("Error al persistir producto en PostgreSQL:", err);
+      // En caso de fallo de red/seguridad, notificar claramente
       setShowCreateModal(false);
-      setProductFeedback(`Producto ${payload.sku} registrado localmente (BFF offline: ${err instanceof Error ? err.message : "Error"})`);
+      setProductFeedback(`Error al persistir ${payload.sku}: ${err instanceof Error ? err.message : "Error desconocido"}`);
     } finally {
       setIsCreatingProduct(false);
     }
@@ -586,11 +566,11 @@ export default function AdminPage() {
         }),
       });
       setProducts((prev) => prev.map((p) => (p.id === editingProduct.id ? updated : p)));
-      setProductFeedback(`Producto ${editingProduct.sku} actualizado correctamente.`);
-    } catch {
-      // Modo fallback
-      setProducts((prev) => prev.map((p) => (p.id === editingProduct.id ? updated : p)));
-      setProductFeedback(`Producto ${editingProduct.sku} modificado localmente.`);
+      setProductFeedback(`Producto ${editingProduct.sku} actualizado correctamente en la base de datos.`);
+      await loadInventory(session || readAuthSession());
+    } catch (err: unknown) {
+      console.error("Error al actualizar producto en PostgreSQL:", err);
+      setProductFeedback(`Error al actualizar ${editingProduct.sku}: ${err instanceof Error ? err.message : "Error desconocido"}`);
     } finally {
       setIsSavingEdit(false);
       setEditingProduct(null);

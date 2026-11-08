@@ -87,9 +87,10 @@ public class ProductoService {
                 limpiar(request.descripcion()),
                 request.categoria().trim(),
                 request.precioVenta(),
-                request.stockMinimo()
+                request.stockMinimo(),
+                request.stockActual() != null ? request.stockActual() : 0
         );
-        Producto creado = productoRepository.save(producto);
+        Producto creado = productoRepository.saveAndFlush(producto);
         log.info("Producto creado sku={} id={}", creado.getSku(), creado.getId());
         return mapper.toProductoResponse(creado);
     }

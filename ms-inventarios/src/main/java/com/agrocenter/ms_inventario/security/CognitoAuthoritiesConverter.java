@@ -38,6 +38,9 @@ public class CognitoAuthoritiesConverter implements Converter<Jwt, Collection<Gr
             return;
         }
         String normalized = role.trim().toUpperCase(Locale.ROOT);
+        if (normalized.startsWith("ROLE_")) {
+            normalized = normalized.substring(5);
+        }
         if (ALLOWED_ROLES.contains(normalized)) {
             authorities.add(new SimpleGrantedAuthority("ROLE_" + normalized));
         }

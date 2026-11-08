@@ -73,12 +73,24 @@ public class Producto {
             BigDecimal precioVenta,
             Integer stockMinimo
     ) {
+        this(sku, nombre, descripcion, categoria, precioVenta, stockMinimo, 0);
+    }
+
+    public Producto(
+            String sku,
+            String nombre,
+            String descripcion,
+            String categoria,
+            BigDecimal precioVenta,
+            Integer stockMinimo,
+            Integer stockActual
+    ) {
         this.sku = sku;
         this.nombre = nombre;
         this.descripcion = descripcion;
         this.categoria = categoria;
         this.precioVenta = precioVenta;
-        this.stockActual = 0;
+        this.stockActual = stockActual != null ? stockActual : 0;
         this.stockMinimo = stockMinimo;
         this.activo = true;
     }
