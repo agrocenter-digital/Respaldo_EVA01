@@ -33,6 +33,9 @@ LABEL org.opencontainers.image.title="AgroCenter front-web" \
       org.opencontainers.image.description="Frontend estático de AgroCenter Digital servido con Nginx" \
       org.opencontainers.image.vendor="AgroCenter"
 
+# Instalar utilidades de red para diagnóstico y validación en EC2 (curl, nslookup, etc.)
+RUN apk add --no-cache curl bind-tools
+
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 RUN rm -rf /usr/share/nginx/html/*
 COPY --from=builder /app/out /usr/share/nginx/html
