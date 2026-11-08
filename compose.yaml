@@ -33,6 +33,7 @@ services:
       - "${DB_INVENTARIO_PORT:-5434}:5432"
     volumes:
       - inventario-data:/var/lib/postgresql/data
+      - ./docker/postgres/init-inventario.sql:/docker-entrypoint-initdb.d/init-inventario.sql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 5s
@@ -219,7 +220,7 @@ services:
       MS_VENTAS_RESPONSE_TIMEOUT: 6s
       MS_COMPRAS_CONNECT_TIMEOUT: 2s
       MS_COMPRAS_RESPONSE_TIMEOUT: 4s
-      ALLOWED_ORIGINS: http://localhost:3000,http://localhost:5173,http://localhost
+      ALLOWED_ORIGINS: http://localhost:3000,http://localhost:5173,http://localhost,http://44.195.118.58:3000,https://front-web-seven.vercel.app
       SWAGGER_ENABLED: "true"
     ports:
       - "${BFF_PORT:-8080}:8080"
