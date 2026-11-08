@@ -1,0 +1,266 @@
+name: agrocenter
+
+# =============================================================================
+# AgroCenter Digital - stack completo local
+#   front-web (Nginx) -> bff-web -> ms-inventario / ms-ventas / ms-compras
+#   Cada microservicio con su propia base PostgreSQL (database-per-service).
+# =============================================================================
+
+x-dev-jwt-env: &dev-jwt-env
+  DEV_JWT_SECRET: ${DEV_JWT_SECRET:-agrocenter-local-dev-secret-please-change-32b}
+  DEV_JWT_ISSUER: ${DEV_JWT_ISSUER:-http://localhost:8081/dev-issuer}
+  COGNITO_AUDIENCE: ${COGNITO_AUDIENCE:-agrocenter-api}
+
+x-java-env: &java-env
+  SPRING_PROFILES_ACTIVE: dev
+  JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:--XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError}
+
+x-db-env: &db-env
+  POSTGRES_USER: ${POSTGRES_USER:-agrocenter}
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agrocenter}
+
+services:
+  # ---------------------------------------------------------------------------
+  # Bases de datos
+  # ---------------------------------------------------------------------------
+  db-inventario:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      <<: *db-env
+      POSTGRES_DB: db_inventario
+    ports:
+      - "${DB_INVENTARIO_PORT:-5434}:5432"
+    volumes:
+      - inventario-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - agrocenter
+    security_opt:
+      - no-new-privileges:true
+
+  db-ventas:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      <<: *db-env
+      POSTGRES_DB: db_ventas
+    ports:
+      - "${DB_VENTAS_PORT:-5435}:5432"
+    volumes:
+      - ventas-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - agrocenter
+    security_opt:
+      - no-new-privileges:true
+
+  db-compras:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      <<: *db-env
+      POSTGRES_DB: db_compras
+    ports:
+      - "${DB_COMPRAS_PORT:-5436}:5432"
+    volumes:
+      - compras-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    networks:
+      - agrocenter
+    security_opt:
+      - no-new-privileges:true
+
+  # ---------------------------------------------------------------------------
+  # Microservicios
+  # ---------------------------------------------------------------------------
+  ms-inventario:
+    image: agrocenter/ms-inventario:local
+    build:
+      context: ./ms-inventarios
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    depends_on:
+      db-inventario:
+        condition: service_healthy
+    environment:
+      <<: [*java-env, *dev-jwt-env]
+      SERVER_PORT: 8081
+      DB_URL: jdbc:postgresql://db-inventario:5432/db_inventario
+      DB_USERNAME: ${POSTGRES_USER:-agrocenter}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-agrocenter}
+      DEV_JWT_TTL_SECONDS: "86400"
+      SWAGGER_ENABLED: "true"
+    ports:
+      - "${MS_INVENTARIO_PORT:-8081}:8081"
+    networks:
+      - agrocenter
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 20s
+
+  ms-ventas:
+    image: agrocenter/ms-ventas:local
+    build:
+      context: ./ms-ventas
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    depends_on:
+      db-ventas:
+        condition: service_healthy
+      ms-inventario:
+        condition: service_healthy
+    environment:
+      <<: [*java-env, *dev-jwt-env]
+      SERVER_PORT: 8082
+      DB_URL: jdbc:postgresql://db-ventas:5432/db_ventas
+      DB_USERNAME: ${POSTGRES_USER:-agrocenter}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-agrocenter}
+      INVENTORY_SERVICE_URL: http://ms-inventario:8081
+      INVENTORY_CONNECT_TIMEOUT: 2s
+      INVENTORY_READ_TIMEOUT: 3s
+      SWAGGER_ENABLED: "true"
+    ports:
+      - "${MS_VENTAS_PORT:-8082}:8082"
+    networks:
+      - agrocenter
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 20s
+
+  ms-compras:
+    image: agrocenter/ms-compras:local
+    build:
+      context: ./ms-compras
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    depends_on:
+      db-compras:
+        condition: service_healthy
+      ms-inventario:
+        condition: service_healthy
+    environment:
+      <<: [*java-env, *dev-jwt-env]
+      SERVER_PORT: 8083
+      DB_URL: jdbc:postgresql://db-compras:5432/db_compras
+      DB_USERNAME: ${POSTGRES_USER:-agrocenter}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-agrocenter}
+      INVENTORY_SERVICE_URL: http://ms-inventario:8081
+      INVENTORY_CONNECT_TIMEOUT: 2s
+      INVENTORY_READ_TIMEOUT: 3s
+      SWAGGER_ENABLED: "true"
+    ports:
+      - "${MS_COMPRAS_PORT:-8083}:8083"
+    networks:
+      - agrocenter
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # BFF
+  # ---------------------------------------------------------------------------
+  bff-web:
+    image: agrocenter/bff-web:local
+    build:
+      context: ./bff-web
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    depends_on:
+      ms-inventario:
+        condition: service_healthy
+      ms-ventas:
+        condition: service_healthy
+      ms-compras:
+        condition: service_healthy
+    environment:
+      <<: [*java-env, *dev-jwt-env]
+      SERVER_PORT: 8080
+      MS_INVENTARIO_URL: http://ms-inventario:8081
+      MS_VENTAS_URL: http://ms-ventas:8082
+      MS_COMPRAS_URL: http://ms-compras:8083
+      MS_INVENTARIO_CONNECT_TIMEOUT: 2s
+      MS_INVENTARIO_RESPONSE_TIMEOUT: 4s
+      MS_VENTAS_CONNECT_TIMEOUT: 2s
+      MS_VENTAS_RESPONSE_TIMEOUT: 6s
+      MS_COMPRAS_CONNECT_TIMEOUT: 2s
+      MS_COMPRAS_RESPONSE_TIMEOUT: 4s
+      ALLOWED_ORIGINS: http://localhost:3000,http://localhost:5173,http://localhost
+      SWAGGER_ENABLED: "true"
+    ports:
+      - "${BFF_PORT:-8080}:8080"
+    networks:
+      - agrocenter
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    stop_grace_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Frontend estático (Nginx)
+  # ---------------------------------------------------------------------------
+  front-web:
+    image: agrocenter/front-web:local
+    build:
+      context: ./front-web
+      dockerfile: Dockerfile
+      args:
+        # Vacío = llamadas relativas; Nginx las proxya al BFF.
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-}
+    restart: unless-stopped
+    depends_on:
+      bff-web:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-3000}:80"
+    networks:
+      - agrocenter
+    security_opt:
+      - no-new-privileges:true
+
+networks:
+  agrocenter:
+    driver: bridge
+
+volumes:
+  inventario-data:
+  ventas-data:
+  compras-data:

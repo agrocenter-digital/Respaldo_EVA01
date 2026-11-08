@@ -15,6 +15,9 @@ Aplicación web React / Next.js para la plataforma **AgroCenter Digital**, optim
 
 ## 2. Autenticación y Flujo de Sesión
 
+> **V1 estática / demo:** la autenticación con Cognito está temporalmente reemplazada
+> por una sesión simulada de administrador (`ROLE_ADMIN`) en `lib/cognito.ts`.
+
 La aplicación utiliza **AWS Cognito** con autenticación segura:
 * **Protocolo**: OAuth 2.0 Authorization Code con **PKCE** (Proof Key for Code Exchange).
 * **Proveedores de Identidad**: Soporta autenticación nativa de Cognito y federación con **Google**.
@@ -71,12 +74,21 @@ npm test
 
 ## 5. Docker
 
-El proyecto cuenta con un `Dockerfile` multi-stage optimizado sobre Alpine Linux con usuario no-root (`agrocenter`):
+El `Dockerfile` es multi-stage: compila el export estático de Next.js y lo sirve con
+Nginx en el puerto `80`. Nginx también proxya `/api/*` y `/actuator/*` hacia el
+servicio `bff-web` del compose.
 
 ```bash
 # Construir imagen local
 docker build -t agrocenter-front-web:latest .
 
-# Ejecutar contenedor
-docker run -d --name agrocenter-front -p 3000:3000 agrocenter-front-web:latest
+# Ejecutar contenedor (requiere red con un host "bff-web" para el proxy)
+docker run -d --name agrocenter-front -p 3000:80 agrocenter-front-web:latest
+```
+
+Para levantar todo el ecosistema (frontend + BFF + microservicios + PostgreSQL),
+usar el `compose.yaml` de la raíz del repositorio:
+
+```bash
+docker compose up -d --build
 ```

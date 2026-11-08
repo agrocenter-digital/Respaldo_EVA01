@@ -1,0 +1,11 @@
+# Variables de entorno locales
+.env
+.env.local
+.env.*.local
+
+# Artefactos de build
+front-web/node_modules/
+front-web/.next/
+front-web/out/
+front-web/tsconfig.tsbuildinfo
+*/target/

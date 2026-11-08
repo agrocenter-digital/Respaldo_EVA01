@@ -261,7 +261,7 @@ const fallbackInitialPurchases: PurchaseAdmin[] = [
 ];
 
 export default function AdminPage() {
-  const [session, setSession] = useState<AuthSession | null>(null);
+  const [session, setSession] = useState<AuthSession | null>(() => readAuthSession());
   const [activeTab, setActiveTab] = useState<"inventory" | "sales" | "purchases" | "apis" | "console">("inventory");
 
   // Search & Filter State
