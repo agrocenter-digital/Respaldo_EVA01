@@ -1,4 +1,4 @@
-import { readAuthSession } from "./cognito";
+import { getAuthToken, isTokenExpired, readAuthSession } from "./cognito";
 
 export const API_BASE_URL = (
   process.env.NEXT_PUBLIC_API_BASE_URL ||
@@ -24,21 +24,53 @@ export async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const session = readAuthSession();
+  const method = (options.method || "GET").toUpperCase();
+  const isWriteMethod = ["POST", "PUT", "PATCH", "DELETE"].includes(method);
+  const cleanEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
+  const isProtectedEndpoint =
+    cleanEndpoint.includes("/bff/inventario") ||
+    cleanEndpoint.includes("/bff/admin") ||
+    cleanEndpoint.includes("/bff/compras");
+
+  // 1. Obtener y validar el token activo (desde URL, storage, o fallback dev)
+  let activeToken = getAuthToken();
+
+  // Si no se obtuvo de getAuthToken, intentar desde readAuthSession
+  if (!activeToken) {
+    const session = readAuthSession();
+    activeToken = session?.accessToken || session?.idToken || null;
+    if (activeToken) {
+      activeToken = activeToken.replace(/^Bearer\s+/i, "").replace(/^"|"$/g, "").trim();
+    }
+  }
+
+  // 2. Control de sesión y autorización previa al envío
+  if (!activeToken && (isWriteMethod || isProtectedEndpoint)) {
+    throw new HttpError(
+      "Operación no autorizada: No se encontró un token de autenticación Bearer activo. Por favor ingresa tu token antes de guardar.",
+      401
+    );
+  }
+
+  if (activeToken && isTokenExpired(activeToken)) {
+    throw new HttpError(
+      "Sesión expirada: El token de autenticación ha caducado. Por favor renueva tu token de sesión.",
+      401
+    );
+  }
+
+  // 3. Preparación de encabezados HTTP con inyección obligatoria del token
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
   };
 
-  // Se prioriza el accessToken requerido por los Resource Servers (CognitoTokenUseValidator exige token_use: "access")
-  const rawToken = session?.accessToken || session?.idToken;
-  const cleanToken = rawToken ? rawToken.replace(/^Bearer\s+/i, "").trim() : "";
-  if (cleanToken && !headers["Authorization"] && !headers["authorization"]) {
-    headers["Authorization"] = `Bearer ${cleanToken}`;
+  if (activeToken) {
+    // Inyección forzosa para evitar que viaje anónima o con token vacío
+    headers["Authorization"] = `Bearer ${activeToken}`;
   }
 
   // Garantizar idempotency-key para solicitudes POST hacia el BFF si no viene provista
-  const method = (options.method || "GET").toUpperCase();
   if (method === "POST" && !headers["Idempotency-Key"] && !headers["idempotency-key"]) {
     headers["Idempotency-Key"] =
       typeof crypto !== "undefined" && crypto.randomUUID
@@ -46,7 +78,6 @@ export async function apiRequest<T>(
         : `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
   }
 
-  const cleanEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
   const targetUrl = `${API_BASE_URL}${cleanEndpoint}`;
   const response = await fetch(targetUrl, {
     ...options,

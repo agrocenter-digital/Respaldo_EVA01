@@ -69,6 +69,8 @@ function extractTokenFromStorage(storage: Storage): string | null {
     "auth_token",
     "idToken",
     "id_token",
+    "Authorization",
+    "authorization",
   ];
 
   for (const key of candidateKeys) {
@@ -87,7 +89,8 @@ function extractTokenFromStorage(storage: Storage): string | null {
           parsed.token ||
           parsed.jwt ||
           parsed.idToken ||
-          parsed.id_token;
+          parsed.id_token ||
+          parsed.Authorization;
         if (typeof candidate === "string" && candidate.trim().length > 10) {
           return candidate.trim().replace(/^Bearer\s+/i, "");
         }
@@ -102,6 +105,91 @@ function extractTokenFromStorage(storage: Storage): string | null {
     }
   }
   return null;
+}
+
+/**
+ * Comprueba si un token JWT ha expirado mediante su claim `exp`.
+ */
+export function isTokenExpired(token?: string | null): boolean {
+  if (!token) return true;
+  const claims = decodeClaims(token);
+  if (typeof claims.exp === "number") {
+    return Math.floor(Date.now() / 1000) >= claims.exp;
+  }
+  return false;
+}
+
+/**
+ * Extrae y resuelve el token JWT activo de manera determinista:
+ * 1. URL search params (?token=, ?idToken=, ?accessToken=, ?access_token=, etc.)
+ * 2. URL hash fragment (#token=, #accessToken=, etc.)
+ * 3. sessionStorage (accessToken, token, idToken, agrocenter.auth)
+ * 4. localStorage (accessToken, token, idToken, agrocenter.auth)
+ * 5. Fallback a DEV_ADMIN_ACCESS_TOKEN
+ */
+export function getAuthToken(): string | null {
+  if (typeof window === "undefined") {
+    return DEV_ADMIN_ACCESS_TOKEN;
+  }
+
+  try {
+    // 1. URL Search Params (?token=... o ?idToken=... o ?accessToken=...)
+    if (window.location.search) {
+      const searchParams = new URLSearchParams(window.location.search);
+      const urlToken =
+        searchParams.get("token") ||
+        searchParams.get("idToken") ||
+        searchParams.get("id_token") ||
+        searchParams.get("accessToken") ||
+        searchParams.get("access_token") ||
+        searchParams.get("jwt");
+
+      if (urlToken && urlToken.trim().length > 10) {
+        const clean = urlToken.replace(/^Bearer\s+/i, "").replace(/^"|"$/g, "").trim();
+        saveAuthToken(clean);
+        return clean;
+      }
+    }
+
+    // 2. URL Hash Fragment (#token=... o #idToken=... o #accessToken=...)
+    if (window.location.hash) {
+      const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+      const hashToken =
+        hashParams.get("token") ||
+        hashParams.get("idToken") ||
+        hashParams.get("id_token") ||
+        hashParams.get("accessToken") ||
+        hashParams.get("access_token") ||
+        hashParams.get("jwt");
+
+      if (hashToken && hashToken.trim().length > 10) {
+        const clean = hashToken.replace(/^Bearer\s+/i, "").replace(/^"|"$/g, "").trim();
+        saveAuthToken(clean);
+        return clean;
+      }
+    }
+
+    // 3. sessionStorage
+    const fromSession = extractTokenFromStorage(sessionStorage);
+    if (fromSession && fromSession.trim().length > 10) {
+      return fromSession.replace(/^Bearer\s+/i, "").replace(/^"|"$/g, "").trim();
+    }
+
+    // 4. localStorage
+    const fromLocal = extractTokenFromStorage(localStorage);
+    if (fromLocal && fromLocal.trim().length > 10) {
+      return fromLocal.replace(/^Bearer\s+/i, "").replace(/^"|"$/g, "").trim();
+    }
+
+    // 5. Fallback a DEV_ADMIN_ACCESS_TOKEN
+    if (DEV_ADMIN_ACCESS_TOKEN) {
+      return DEV_ADMIN_ACCESS_TOKEN;
+    }
+  } catch {
+    // Continuar en caso de excepciones en storage o URL
+  }
+
+  return DEV_ADMIN_ACCESS_TOKEN;
 }
 
 /**
@@ -130,6 +218,10 @@ export function saveAuthToken(rawToken: string): AuthSession {
       localStorage.setItem(SESSION_KEY, serialized);
       sessionStorage.setItem("accessToken", cleanToken);
       localStorage.setItem("accessToken", cleanToken);
+      sessionStorage.setItem("token", cleanToken);
+      localStorage.setItem("token", cleanToken);
+      sessionStorage.setItem("idToken", cleanToken);
+      localStorage.setItem("idToken", cleanToken);
     } catch {
       // Storage no disponible o cuota excedida
     }

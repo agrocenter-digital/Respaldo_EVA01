@@ -33,7 +33,7 @@ import {
   XCircle,
   Key,
 } from "lucide-react";
-import { AuthSession, isUserAdmin, readAuthSession, saveAuthToken } from "@/lib/cognito";
+import { AuthSession, isUserAdmin, readAuthSession, saveAuthToken, getAuthToken, isTokenExpired } from "@/lib/cognito";
 import { apiRequest, HttpError, API_BASE_URL } from "@/lib/api";
 
 type FeedbackAlert = {
@@ -348,8 +348,7 @@ export default function AdminPage() {
         : `/${endpointConfig.endpoint}`;
       const url = `${API_BASE_URL}${cleanEndpoint}`;
 
-      const activeSession = session || readAuthSession();
-      const token = activeSession?.accessToken || activeSession?.idToken;
+      const token = getAuthToken();
       const headers: Record<string, string> = {
         Accept: "application/json",
       };
@@ -555,17 +554,32 @@ export default function AdminPage() {
       stockActual: Math.floor(stockActualNum),
     };
 
+    // Validación obligatoria de sesión y token previo al envío
+    const activeToken = getAuthToken();
+    if (!activeToken) {
+      const authRequiredMsg = "No se ha detectado una sesión activa ni un token Bearer en el navegador. Por favor ingresa tu token en el botón superior 'JWT Bearer' antes de guardar.";
+      setCreateProductError(authRequiredMsg);
+      setProductFeedback({ type: "error", message: authRequiredMsg });
+      setShowTokenModal(true);
+      return;
+    }
+
+    if (isTokenExpired(activeToken)) {
+      const expiredMsg = "El token de autenticación ha expirado. Por favor ingresa un token válido en el botón 'JWT Bearer'.";
+      setCreateProductError(expiredMsg);
+      setProductFeedback({ type: "error", message: expiredMsg });
+      setShowTokenModal(true);
+      return;
+    }
+
     setIsCreatingProduct(true);
 
     try {
-      const activeSession = session || readAuthSession();
-      const token = activeSession?.accessToken || activeSession?.idToken;
-
       const created = await apiRequest<any>("/api/bff/inventario/productos", {
         method: "POST",
         headers: {
+          "Authorization": `Bearer ${activeToken}`,
           "Content-Type": "application/json",
-          ...(token ? { Authorization: `Bearer ${token.replace(/^Bearer\s+/i, "").trim()}` } : {}),
         },
         body: JSON.stringify(payload),
       });
@@ -599,7 +613,7 @@ export default function AdminPage() {
       setNewStockMinimo(5);
 
       // Sincronizar catálogo completo en background
-      await loadInventory(activeSession);
+      await loadInventory(session || readAuthSession());
     } catch (err: unknown) {
       console.error("Error al persistir producto en PostgreSQL:", err);
       let errorMsg = err instanceof Error ? err.message : "Error desconocido de red";
@@ -607,7 +621,7 @@ export default function AdminPage() {
         if (err.status === 401) {
           errorMsg = "Error 401 Unauthorized: El token de autenticación no es válido o ha expirado. Verifica las credenciales.";
         } else if (err.status === 403) {
-          errorMsg = "Error 403 Forbidden: Se requiere el rol ROLE_ADMIN en el token JWT para crear insumos.";
+          errorMsg = "Error 403 Forbidden: Spring Security rechazó la solicitud. Verifica que el token contenga el rol ROLE_ADMIN.";
         } else if (err.status === 400) {
           errorMsg = `Error 400 Bad Request: ${err.message}`;
         }
@@ -627,6 +641,17 @@ export default function AdminPage() {
   async function handleSaveEdit(e: FormEvent) {
     e.preventDefault();
     if (!editingProduct) return;
+
+    const activeToken = getAuthToken();
+    if (!activeToken) {
+      setProductFeedback({
+        type: "error",
+        message: "No se encontró un token de sesión activo para actualizar el insumo.",
+      });
+      setShowTokenModal(true);
+      return;
+    }
+
     setIsSavingEdit(true);
 
     const updated = {
@@ -638,6 +663,10 @@ export default function AdminPage() {
     try {
       await apiRequest(`/api/bff/inventario/productos/${editingProduct.id}`, {
         method: "PUT",
+        headers: {
+          "Authorization": `Bearer ${activeToken}`,
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
           sku: editingProduct.sku,
           nombre: editingProduct.nombre,
@@ -681,8 +710,7 @@ export default function AdminPage() {
         : `/${selectedConsoleEndpoint}`;
       const url = `${API_BASE_URL}${cleanEndpoint}`;
 
-      const activeSession = session || readAuthSession();
-      const token = activeSession?.accessToken || activeSession?.idToken;
+      const token = getAuthToken();
       const headers: Record<string, string> = {
         Accept: "application/json",
       };
