@@ -110,7 +110,8 @@ class InventarioConcurrencyIntegrationTest {
                 null,
                 "Pruebas",
                 new BigDecimal("1000.00"),
-                2
+                2,
+                null
         ));
     }
 }

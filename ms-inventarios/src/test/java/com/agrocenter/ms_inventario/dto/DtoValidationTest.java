@@ -26,7 +26,8 @@ class DtoValidationTest {
                 null,
                 "Fertilizantes",
                 new BigDecimal("18990.00"),
-                5
+                5,
+                null
         );
 
         assertThat(validator.validate(request)).isEmpty();
@@ -40,6 +41,7 @@ class DtoValidationTest {
                 null,
                 " ",
                 new BigDecimal("-1.00"),
+                -1,
                 -1
         );
 

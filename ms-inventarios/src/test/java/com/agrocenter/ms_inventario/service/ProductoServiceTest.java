@@ -39,10 +39,11 @@ class ProductoServiceTest {
                 "Saco de semillas",
                 "Semillas",
                 new BigDecimal("24990.00"),
-                10
+                10,
+                null
         );
         when(productoRepository.existsBySkuIgnoreCase("SEM-001")).thenReturn(false);
-        when(productoRepository.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        when(productoRepository.saveAndFlush(any())).thenAnswer(invocation -> invocation.getArgument(0));
 
         ProductoResponse response = productoService.crear(request);
 
