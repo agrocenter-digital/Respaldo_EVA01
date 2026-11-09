@@ -9,10 +9,12 @@ name: agrocenter
 x-dev-jwt-env: &dev-jwt-env
   DEV_JWT_SECRET: ${DEV_JWT_SECRET:-agrocenter-local-dev-secret-please-change-32b}
   DEV_JWT_ISSUER: ${DEV_JWT_ISSUER:-http://localhost:8081/dev-issuer}
+  COGNITO_ISSUER_URI: ${COGNITO_ISSUER_URI:-https://cognito-idp.us-east-1.amazonaws.com/us-east-1_DBCBjL67J}
+  COGNITO_JWK_SET_URI: ${COGNITO_JWK_SET_URI:-https://cognito-idp.us-east-1.amazonaws.com/us-east-1_DBCBjL67J/.well-known/jwks.json}
   COGNITO_AUDIENCE: ${COGNITO_AUDIENCE:-agrocenter-api}
 
 x-java-env: &java-env
-  SPRING_PROFILES_ACTIVE: dev
+  SPRING_PROFILES_ACTIVE: ${SPRING_PROFILES_ACTIVE:-dev}
   JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:--Xms128m -Xmx384m -XX:+ExitOnOutOfMemoryError}
 
 x-db-env: &db-env
@@ -238,7 +240,8 @@ services:
       MS_VENTAS_RESPONSE_TIMEOUT: 6s
       MS_COMPRAS_CONNECT_TIMEOUT: 2s
       MS_COMPRAS_RESPONSE_TIMEOUT: 4s
-      ALLOWED_ORIGINS: http://localhost:3000,http://localhost:5173,http://localhost,http://44.195.118.58:3000,https://front-web-seven.vercel.app
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-https://front-web-seven.vercel.app,http://44.195.118.58:3000,http://34.195.64.174:3000,http://localhost:3000,http://localhost:5173,http://localhost,http://127.0.0.1:3000,http://127.0.0.1}
+      ALLOWED_ORIGIN_PATTERNS: ${ALLOWED_ORIGIN_PATTERNS:-https://*.vercel.app}
       SWAGGER_ENABLED: "true"
     ports:
       - "${BFF_PORT:-8080}:8080"
@@ -270,6 +273,12 @@ services:
       args:
         # Vacío = llamadas relativas; Nginx las proxya al BFF.
         NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-}
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
+        NEXT_PUBLIC_COGNITO_DOMAIN: ${NEXT_PUBLIC_COGNITO_DOMAIN:-}
+        NEXT_PUBLIC_COGNITO_CLIENT_ID: ${NEXT_PUBLIC_COGNITO_CLIENT_ID:-}
+        NEXT_PUBLIC_COGNITO_REDIRECT_URI: ${NEXT_PUBLIC_COGNITO_REDIRECT_URI:-}
+        # Solo desarrollo local; en producción debe quedar vacío.
+        NEXT_PUBLIC_DEV_JWT_FALLBACK_TOKEN: ${NEXT_PUBLIC_DEV_JWT_FALLBACK_TOKEN:-}
     restart: unless-stopped
     depends_on:
       bff-web:

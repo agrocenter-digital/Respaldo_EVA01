@@ -1,4 +1,4 @@
-import { getAuthToken, isTokenExpired, readAuthSession } from "./cognito";
+import { getAuthToken, isTokenExpired } from "./cognito";
 
 export const API_BASE_URL = (
   process.env.NEXT_PUBLIC_API_BASE_URL ||
@@ -20,6 +20,14 @@ export class HttpError extends Error {
   }
 }
 
+/**
+ * Cliente HTTP único del panel EC2.
+ *
+ * Toda petición al BFF inyecta el access token propagado desde el sitio
+ * principal. El token se resuelve en cada llamada (no se captura una sola vez)
+ * para que el handoff por URL y la persistencia en storage funcionen incluso si
+ * el componente se montó antes de adoptar la sesión.
+ */
 export async function apiRequest<T>(
   endpoint: string,
   options: RequestInit = {}
@@ -32,45 +40,37 @@ export async function apiRequest<T>(
     cleanEndpoint.includes("/bff/admin") ||
     cleanEndpoint.includes("/bff/compras");
 
-  // 1. Obtener y validar el token activo (desde URL, storage, o fallback dev)
-  let activeToken = getAuthToken();
+  // 1. Resolver el access token vigente (URL -> storage -> fallback dev opcional).
+  const activeToken = getAuthToken();
 
-  // Si no se obtuvo de getAuthToken, intentar desde readAuthSession
-  if (!activeToken) {
-    const session = readAuthSession();
-    activeToken = session?.accessToken || session?.idToken || null;
-    if (activeToken) {
-      activeToken = activeToken.replace(/^Bearer\s+/i, "").replace(/^"|"$/g, "").trim();
-    }
-  }
-
-  // 2. Control de sesión y autorización previa al envío
+  // 2. Autorización previa: las rutas privadas no deben viajar anónimas.
   if (!activeToken && (isWriteMethod || isProtectedEndpoint)) {
     throw new HttpError(
-      "Operación no autorizada: No se encontró un token de autenticación Bearer activo. Por favor ingresa tu token antes de guardar.",
+      "Operación no autorizada: no hay un access token Bearer vigente. " +
+        "Abre este entorno desde el botón de cambio de entorno del sitio principal " +
+        "para propagar la sesión de Cognito.",
       401
     );
   }
 
   if (activeToken && isTokenExpired(activeToken)) {
     throw new HttpError(
-      "Sesión expirada: El token de autenticación ha caducado. Por favor renueva tu token de sesión.",
+      "Sesión expirada: el access token de Cognito ha caducado. Vuelve a iniciar sesión en el sitio principal.",
       401
     );
   }
 
-  // 3. Preparación de encabezados HTTP con inyección obligatoria del token
+  // 3. Encabezados con inyección obligatoria del token.
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
     ...(options.headers as Record<string, string>),
   };
 
   if (activeToken) {
-    // Inyección forzosa para evitar que viaje anónima o con token vacío
     headers["Authorization"] = `Bearer ${activeToken}`;
   }
 
-  // Garantizar idempotency-key para solicitudes POST hacia el BFF si no viene provista
+  // Idempotency-Key para POST hacia el BFF si no viene provista.
   if (method === "POST" && !headers["Idempotency-Key"] && !headers["idempotency-key"]) {
     headers["Idempotency-Key"] =
       typeof crypto !== "undefined" && crypto.randomUUID
@@ -78,6 +78,8 @@ export async function apiRequest<T>(
         : `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
   }
 
+  // En EC2 el frontend y el BFF comparten host (Nginx proxea /api al BFF).
+  // Las URLs relativas funcionan tanto en Nginx como en SSR de Next.js.
   const targetUrl = `${API_BASE_URL}${cleanEndpoint}`;
   const response = await fetch(targetUrl, {
     ...options,
@@ -112,7 +114,6 @@ export async function apiRequest<T>(
     throw new HttpError(errorMessage, response.status, parsedData, errorBody);
   }
 
-  // Si la respuesta es 204 No Content o no tiene body
   if (response.status === 204) {
     return null as T;
   }

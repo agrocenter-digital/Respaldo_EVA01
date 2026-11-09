@@ -11,14 +11,19 @@ export type AuthSession = {
 
 /**
  * ============================================================================
- * MODO DEMO ESTÁTICO (V1) — AUTENTICACIÓN SIMULADA
+ * SESIÓN PROPAGADA DESDE EL SITIO PRINCIPAL (Vercel / Producción)
  * ============================================================================
- * Se omite temporalmente AWS Cognito para poder desplegar el frontend como
- * sitio estático (Nginx / EC2). No hay redirect al Hosted UI ni intercambio
- * de tokens: toda sesión devuelta tiene privilegios de administrador.
+ * El panel EC2 no inicia sesión por sí mismo: recibe un access token de
+ * Cognito desde la redirección del sitio principal. Ese token se adopta desde
+ * el fragmento `#token=...` (preferido) o desde el query string, se persiste
+ * en sessionStorage/localStorage y se inyecta en cada llamada al BFF.
  *
- * Para volver a la autenticación real, restaurar la implementación previa
- * basada en PKCE + Cognito Hosted UI.
+ * Reglas de seguridad:
+ *   1. El backend SOLO acepta access tokens de Cognito (`token_use=access`).
+ *      Un id_token nunca se envía como Authorization Bearer.
+ *   2. No existe un JWT de desarrollo embebido en el bundle de producción.
+ *   3. Si no hay token válido la sesión es nula; el panel no inventa un ADMIN.
+ *   4. Los parámetros con credenciales se eliminan de la URL tras adoptarlos.
  * ============================================================================
  */
 
@@ -27,339 +32,477 @@ const VERIFIER_KEY = "agrocenter.pkce.verifier";
 const STATE_KEY = "agrocenter.pkce.state";
 const CONSUMED_CODE_KEY = "agrocenter.pkce.consumed_code";
 
-// JWT de desarrollo firmado con DEV_JWT_SECRET (compose local). Caduca en 2036.
-// Permite que el panel admin funcione contra los microservicios en perfil `dev`.
-// Si cambias DEV_JWT_SECRET, regenera este token.
-const DEV_ADMIN_ACCESS_TOKEN =
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJodHRwOi8vbG9jYWxob3N0OjgwODEvZGV2LWlzc3VlciIsInN1YiI6ImFkbWluQGFncm9jZW50ZXIubG9jYWwiLCJhdWQiOlsiYWdyb2NlbnRlci1hcGkiXSwiaWF0IjoxNzk0MTUwMTkyLCJuYmYiOjE3OTQxNTAxOTIsImV4cCI6MjEwOTUxMDE5MiwianRpIjoiN2Y2NmZiODktNWJmMy00OGNjLWIwNmEtMjI3YzdmNmNiODNjIiwidG9rZW5fdXNlIjoiYWNjZXNzIiwiY29nbml0bzpncm91cHMiOlsiQURNSU4iXSwic2NvcGUiOiJpbnZlbnRhcmlvLnN0b2NrLnJlYWQgaW52ZW50YXJpby5zdG9jay53cml0ZSJ9.uJLAC3FtcAtxnb53-P917wsOWyP_dozH5a9KwP0HPtg";
+// Fallback opcional SOLO para desarrollo local. Nunca debe configurarse en
+// producción: el valor se inlinea en el bundle del navegador.
+const DEV_FALLBACK_TOKEN = (
+  process.env.NEXT_PUBLIC_DEV_JWT_FALLBACK_TOKEN ?? ""
+).trim();
 
-const MOCK_ADMIN_SESSION: AuthSession = {
-  isAuthenticated: true,
-  accessToken: DEV_ADMIN_ACCESS_TOKEN,
-  idToken: "mock-id-token-admin-v1",
-  name: "Administrador AgroCenter",
-  role: "ROLE_ADMIN",
-  email: "admin@agrocenter.local",
-  demo: true,
-  groups: ["ROLE_ADMIN"],
-};
+const ACCESS_TOKEN_PARAMS = ["token", "accessToken", "access_token", "jwt"];
+const ID_TOKEN_PARAMS = ["idToken", "id_token"];
+const IDENTITY_PARAMS = ["name", "email", "role"];
+const HANDOFF_PARAMS = [...ACCESS_TOKEN_PARAMS, ...ID_TOKEN_PARAMS, ...IDENTITY_PARAMS];
 
-/**
- * Devuelve la sesión simulada de administrador por defecto.
- * Es segura de invocar en SSR porque no depende de `window`.
- */
-export function getStoredSession(): AuthSession {
-  return {
-    ...MOCK_ADMIN_SESSION,
-    groups: [...(MOCK_ADMIN_SESSION.groups ?? [])],
-  };
+function devFallbackEnabled() {
+  return process.env.NODE_ENV === "development" && DEV_FALLBACK_TOKEN.length > 20;
 }
 
-/**
- * Extrae un token Bearer/JWT desde una instancia de Storage (sessionStorage o localStorage)
- * soportando tanto JSON serializado como cadenas de texto planas.
- */
-function extractTokenFromStorage(storage: Storage): string | null {
-  const candidateKeys = [
-    SESSION_KEY,
-    "accessToken",
-    "access_token",
-    "token",
-    "jwt",
-    "auth_token",
-    "idToken",
-    "id_token",
-    "Authorization",
-    "authorization",
-  ];
+function cleanToken(value?: string | null): string {
+  if (!value) return "";
+  return value
+    .trim()
+    .replace(/^Bearer\s+/i, "")
+    .replace(/^"|"$/g, "")
+    .trim();
+}
 
-  for (const key of candidateKeys) {
-    try {
-      const raw = storage.getItem(key);
-      if (!raw) continue;
-      const trimmed = raw.trim();
-      if (!trimmed) continue;
+function base64UrlDecode(segment: string): string {
+  const normalized = segment.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = normalized.padEnd(
+    normalized.length + ((4 - (normalized.length % 4)) % 4),
+    "=",
+  );
+  const binary = atob(padded);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
 
-      // 1. Si está serializado en JSON (e.g. objeto AuthSession o { token: "..." })
-      if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-        const parsed = JSON.parse(trimmed);
-        const candidate =
-          parsed.accessToken ||
-          parsed.access_token ||
-          parsed.token ||
-          parsed.jwt ||
-          parsed.idToken ||
-          parsed.id_token ||
-          parsed.Authorization;
-        if (typeof candidate === "string" && candidate.trim().length > 10) {
-          return candidate.trim().replace(/^Bearer\s+/i, "");
-        }
-      }
-
-      // 2. Si está almacenado como string plano (e.g. JWT "eyJ...")
-      if (trimmed.length > 10 && !trimmed.startsWith("{")) {
-        return trimmed.replace(/^Bearer\s+/i, "").replace(/^"|"$/g, "");
-      }
-    } catch {
-      // Ignorar entradas inválidas y continuar probando siguientes claves
-    }
+export function decodeClaims(token?: string | null): Record<string, unknown> {
+  if (!token) return {};
+  try {
+    const payload = token.split(".")[1];
+    if (!payload) return {};
+    return JSON.parse(base64UrlDecode(payload)) as Record<string, unknown>;
+  } catch {
+    return {};
   }
-  return null;
 }
 
-/**
- * Comprueba si un token JWT ha expirado mediante su claim `exp`.
- */
 export function isTokenExpired(token?: string | null): boolean {
   if (!token) return true;
   const claims = decodeClaims(token);
   if (typeof claims.exp === "number") {
     return Math.floor(Date.now() / 1000) >= claims.exp;
   }
+  // Tokens opacos (sin claim exp) se aceptan; el backend hará la validación final.
   return false;
 }
 
 /**
- * Extrae y resuelve el token JWT activo de manera determinista:
- * 1. URL search params (?token=, ?idToken=, ?accessToken=, ?access_token=, etc.)
- * 2. URL hash fragment (#token=, #accessToken=, etc.)
- * 3. sessionStorage (accessToken, token, idToken, agrocenter.auth)
- * 4. localStorage (accessToken, token, idToken, agrocenter.auth)
- * 5. Fallback a DEV_ADMIN_ACCESS_TOKEN
+ * Un access token de Cognito tiene `token_use=access`. Los id_token tienen
+ * `token_use=id` y son rechazados por el Resource Server del BFF.
  */
-export function getAuthToken(): string | null {
-  if (typeof window === "undefined") {
-    return DEV_ADMIN_ACCESS_TOKEN;
-  }
+export function isAccessToken(token?: string | null): boolean {
+  if (!token) return false;
+  const claims = decodeClaims(token);
+  if (Object.keys(claims).length === 0) return true; // token opaco / no JWT
+  const tokenUse = claims.token_use;
+  return typeof tokenUse !== "string" || tokenUse.toLowerCase() === "access";
+}
 
+function groupsOf(claims: Record<string, unknown>): string[] {
+  const raw = claims["cognito:groups"];
+  if (Array.isArray(raw)) {
+    return raw.filter((group): group is string => typeof group === "string");
+  }
+  if (typeof raw === "string") {
+    return raw
+      .replace(/^\[|\]$/g, "")
+      .split(/[,\s]+/)
+      .map((value) => value.replace(/["']/g, "").trim())
+      .filter(Boolean);
+  }
+  return [];
+}
+
+function isAdminClaims(claims: Record<string, unknown>): boolean {
+  const groups = groupsOf(claims);
+  const role = String(claims.role ?? claims["custom:role"] ?? "").toUpperCase();
+  const scopes = String(claims.scope ?? "")
+    .split(/\s+/)
+    .map((scope) => scope.toLowerCase());
+
+  return (
+    groups.some((group) => {
+      const value = group.toUpperCase();
+      return value === "ADMIN" || value === "ROLE_ADMIN";
+    }) ||
+    role.includes("ADMIN") ||
+    scopes.some(
+      (scope) =>
+        scope === "inventario.stock.write" ||
+        scope === "inventario.stock.read",
+    )
+  );
+}
+
+function roleFromClaims(claims: Record<string, unknown>): string {
+  if (isAdminClaims(claims)) return "ADMIN";
+  const groups = groupsOf(claims);
+  if (groups.length > 0) return groups[0];
+  const role = claims.role ?? claims["custom:role"];
+  return typeof role === "string" && role.trim() ? role.trim() : "Usuario operativo";
+}
+
+function buildSession(
+  accessToken: string,
+  idToken?: string,
+  overrides: {
+    name?: string | null;
+    email?: string | null;
+    role?: string | null;
+    groups?: string[];
+  } = {},
+): AuthSession {
+  const claims = decodeClaims(idToken || accessToken);
+  const groups = overrides.groups?.length ? overrides.groups : groupsOf(claims);
+  const role = overrides.role?.trim() || roleFromClaims(claims);
+  const name =
+    overrides.name?.trim() ||
+    String(
+      claims.name ??
+        claims["cognito:username"] ??
+        claims.email ??
+        claims.sub ??
+        "Usuario AgroCenter",
+    );
+  const email =
+    overrides.email?.trim() ||
+    (typeof claims.email === "string" ? claims.email : undefined);
+
+  return {
+    isAuthenticated: true,
+    accessToken,
+    idToken: idToken || undefined,
+    name,
+    role,
+    email,
+    demo: false,
+    groups,
+  };
+}
+
+function clearAuthStorage() {
+  if (typeof window === "undefined") return;
+  for (const storageName of ["sessionStorage", "localStorage"] as const) {
+    try {
+      const storage = window[storageName];
+      storage.removeItem(SESSION_KEY);
+      storage.removeItem("accessToken");
+      storage.removeItem("access_token");
+      storage.removeItem("token");
+      storage.removeItem("idToken");
+      storage.removeItem("id_token");
+      storage.removeItem("jwt");
+      storage.removeItem(VERIFIER_KEY);
+      storage.removeItem(STATE_KEY);
+      storage.removeItem(CONSUMED_CODE_KEY);
+    } catch {
+      // storage puede estar deshabilitado
+    }
+  }
+}
+
+function persistAuthSession(session: AuthSession) {
+  if (typeof window === "undefined") return;
+  const serialized = JSON.stringify(session);
   try {
-    // 1. URL Search Params (?token=... o ?idToken=... o ?accessToken=...)
-    if (window.location.search) {
-      const searchParams = new URLSearchParams(window.location.search);
-      const urlToken =
-        searchParams.get("token") ||
-        searchParams.get("idToken") ||
-        searchParams.get("id_token") ||
-        searchParams.get("accessToken") ||
-        searchParams.get("access_token") ||
-        searchParams.get("jwt");
-
-      if (urlToken && urlToken.trim().length > 10) {
-        const clean = urlToken.replace(/^Bearer\s+/i, "").replace(/^"|"$/g, "").trim();
-        saveAuthToken(clean);
-        return clean;
-      }
-    }
-
-    // 2. URL Hash Fragment (#token=... o #idToken=... o #accessToken=...)
-    if (window.location.hash) {
-      const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-      const hashToken =
-        hashParams.get("token") ||
-        hashParams.get("idToken") ||
-        hashParams.get("id_token") ||
-        hashParams.get("accessToken") ||
-        hashParams.get("access_token") ||
-        hashParams.get("jwt");
-
-      if (hashToken && hashToken.trim().length > 10) {
-        const clean = hashToken.replace(/^Bearer\s+/i, "").replace(/^"|"$/g, "").trim();
-        saveAuthToken(clean);
-        return clean;
-      }
-    }
-
-    // 3. sessionStorage
-    const fromSession = extractTokenFromStorage(sessionStorage);
-    if (fromSession && fromSession.trim().length > 10) {
-      return fromSession.replace(/^Bearer\s+/i, "").replace(/^"|"$/g, "").trim();
-    }
-
-    // 4. localStorage
-    const fromLocal = extractTokenFromStorage(localStorage);
-    if (fromLocal && fromLocal.trim().length > 10) {
-      return fromLocal.replace(/^Bearer\s+/i, "").replace(/^"|"$/g, "").trim();
-    }
-
-    // 5. Fallback a DEV_ADMIN_ACCESS_TOKEN
-    if (DEV_ADMIN_ACCESS_TOKEN) {
-      return DEV_ADMIN_ACCESS_TOKEN;
-    }
+    window.sessionStorage.setItem(SESSION_KEY, serialized);
+    window.sessionStorage.setItem("accessToken", session.accessToken);
+    if (session.idToken) window.sessionStorage.setItem("idToken", session.idToken);
   } catch {
-    // Continuar en caso de excepciones en storage o URL
+    // sessionStorage puede estar deshabilitado
+  }
+  try {
+    window.localStorage.setItem(SESSION_KEY, serialized);
+    window.localStorage.setItem("accessToken", session.accessToken);
+    if (session.idToken) window.localStorage.setItem("idToken", session.idToken);
+  } catch {
+    // localStorage puede estar deshabilitado
+  }
+}
+
+function parseStoredSession(raw?: string | null): AuthSession | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as Partial<AuthSession>;
+    if (typeof parsed.accessToken !== "string" || !parsed.accessToken.trim()) {
+      return null;
+    }
+    const accessToken = cleanToken(parsed.accessToken);
+    const idToken = cleanToken(parsed.idToken);
+    return buildSession(accessToken, idToken, {
+      name: parsed.name,
+      email: parsed.email,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function storageGet(key: string): string | null {
+  if (typeof window === "undefined") return null;
+  for (const storageName of ["sessionStorage", "localStorage"] as const) {
+    try {
+      const value = window[storageName].getItem(key);
+      if (value) return value;
+    } catch {
+      // storage puede estar deshabilitado
+    }
+  }
+  return null;
+}
+
+function readStoredSession(): AuthSession | null {
+  if (typeof window === "undefined") return null;
+
+  const raw = storageGet(SESSION_KEY);
+  const session = parseStoredSession(raw);
+
+  if (session) {
+    if (
+      !session.accessToken ||
+      isTokenExpired(session.accessToken) ||
+      !isAccessToken(session.accessToken)
+    ) {
+      clearAuthStorage();
+      return null;
+    }
+    return session;
   }
 
-  return DEV_ADMIN_ACCESS_TOKEN;
+  // Compatibilidad con versiones anteriores que guardaban el token plano.
+  const legacy =
+    storageGet("accessToken") ||
+    storageGet("token") ||
+    storageGet("jwt");
+
+  const legacyToken = cleanToken(legacy);
+  if (
+    legacyToken &&
+    !isTokenExpired(legacyToken) &&
+    isAccessToken(legacyToken)
+  ) {
+    return buildSession(legacyToken);
+  }
+
+  return null;
 }
 
 /**
- * Guarda y adopta un token JWT en sessionStorage y localStorage.
+ * Adopta la sesión enviada desde el sitio principal.
+ *
+ * Acepta credenciales tanto en el fragmento (`#token=...&idToken=...`) como en
+ * el query string (`?token=...`), desde `window.location`. El fragmento es el
+ * mecanismo recomendado porque no llega a logs de Nginx ni a cabeceras Referer.
+ * Después de persistir la sesión, elimina las credenciales de la URL.
  */
-export function saveAuthToken(rawToken: string): AuthSession {
-  const cleanToken = rawToken.trim().replace(/^Bearer\s+/i, "").replace(/^"|"$/g, "");
-  const claims = decodeClaims(cleanToken);
-  const adoptedSession: AuthSession = {
-    isAuthenticated: true,
-    accessToken: cleanToken,
-    idToken: cleanToken,
-    name: (claims["cognito:username"] || claims["name"] || claims["email"] || claims["sub"] || "Administrador AgroCenter") as string,
-    role: "ROLE_ADMIN",
-    email: (claims["email"] || claims["sub"] || "admin@agrocenter.local") as string,
-    demo: false,
-    groups: (Array.isArray(claims["cognito:groups"]) && claims["cognito:groups"].length > 0
-      ? (claims["cognito:groups"] as string[])
-      : ["ROLE_ADMIN"]),
+export function adoptSessionFromUrl(): AuthSession | null {
+  if (typeof window === "undefined") return null;
+
+  const url = new URL(window.location.href);
+  const query = new URLSearchParams(url.search);
+  const hash = new URLSearchParams(url.hash.replace(/^#/, ""));
+
+  const pick = (keys: string[]): string | null => {
+    for (const key of keys) {
+      const value = query.get(key) ?? hash.get(key);
+      if (value && value.trim()) return value.trim();
+    }
+    return null;
   };
 
-  if (typeof window !== "undefined") {
-    try {
-      const serialized = JSON.stringify(adoptedSession);
-      sessionStorage.setItem(SESSION_KEY, serialized);
-      localStorage.setItem(SESSION_KEY, serialized);
-      sessionStorage.setItem("accessToken", cleanToken);
-      localStorage.setItem("accessToken", cleanToken);
-      sessionStorage.setItem("token", cleanToken);
-      localStorage.setItem("token", cleanToken);
-      sessionStorage.setItem("idToken", cleanToken);
-      localStorage.setItem("idToken", cleanToken);
-    } catch {
-      // Storage no disponible o cuota excedida
-    }
+  const rawAccessToken = cleanToken(pick(ACCESS_TOKEN_PARAMS));
+  const rawIdToken = cleanToken(pick(ID_TOKEN_PARAMS));
+  const incomingName = pick(["name"]);
+  const incomingEmail = pick(["email"]);
+
+  const hasCredentials = Boolean(rawAccessToken || rawIdToken);
+  if (!hasCredentials) return null;
+
+  // Limpiar credenciales de la URL ANTES de validar, incluso si el token es inválido.
+  HANDOFF_PARAMS.forEach((key) => query.delete(key));
+  url.search = query.toString();
+
+  if (HANDOFF_PARAMS.some((key) => hash.has(key))) {
+    HANDOFF_PARAMS.forEach((key) => hash.delete(key));
+    const remainingHash = hash.toString();
+    url.hash = remainingHash ? `#${remainingHash}` : "";
   }
 
-  return adoptedSession;
+  window.history.replaceState(
+    {},
+    "",
+    `${url.pathname}${url.search}${url.hash}`,
+  );
+
+  // Preferimos el access token. Si solo llegó un id_token no sirve para el BFF.
+  let accessToken = rawAccessToken;
+  if (accessToken && !isAccessToken(accessToken)) {
+    console.warn(
+      "[auth] El parámetro 'token' contiene un id_token; se requiere un access token de Cognito.",
+    );
+    accessToken = "";
+  }
+  if (!accessToken && rawIdToken && isAccessToken(rawIdToken)) {
+    accessToken = rawIdToken;
+  }
+
+  if (!accessToken || isTokenExpired(accessToken)) {
+    return null;
+  }
+
+  const usableIdToken =
+    rawIdToken && !isTokenExpired(rawIdToken) ? rawIdToken : undefined;
+
+  const session = buildSession(accessToken, usableIdToken, {
+    name: incomingName,
+    email: incomingEmail,
+  });
+
+  persistAuthSession(session);
+  return session;
 }
 
-/** En modo demo o handoff de sesión: adopta token por query string, hash fragment, storage o mock fallback. */
+/**
+ * Devuelve la sesión activa: primero adopta credenciales de la URL y luego
+ * consulta el almacenamiento del navegador. En SSR devuelve null.
+ */
 export function readAuthSession(): AuthSession | null {
-  if (typeof window !== "undefined") {
-    try {
-      // 1. Buscar en Query String (?token=... o ?access_token=... o ?accessToken=...)
-      const urlParams = new URLSearchParams(window.location.search);
-      let incomingToken =
-        urlParams.get("token") ||
-        urlParams.get("accessToken") ||
-        urlParams.get("access_token") ||
-        urlParams.get("jwt") ||
-        urlParams.get("idToken") ||
-        urlParams.get("id_token");
-
-      // 2. Si no está en query string, buscar en Hash fragment (#access_token=... o #token=...)
-      if (!incomingToken && window.location.hash) {
-        const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-        incomingToken =
-          hashParams.get("token") ||
-          hashParams.get("access_token") ||
-          hashParams.get("accessToken") ||
-          hashParams.get("jwt") ||
-          hashParams.get("id_token") ||
-          hashParams.get("idToken");
-      }
-
-      if (incomingToken) {
-        const adopted = saveAuthToken(incomingToken);
-
-        // Limpiar parámetros de la URL sin recargar la página
-        urlParams.delete("token");
-        urlParams.delete("accessToken");
-        urlParams.delete("access_token");
-        urlParams.delete("jwt");
-        urlParams.delete("idToken");
-        urlParams.delete("id_token");
-        const cleanSearch = urlParams.toString();
-        const cleanUrl = window.location.pathname + (cleanSearch ? `?${cleanSearch}` : "");
-        window.history.replaceState({}, "", cleanUrl);
-        return adopted;
-      }
-
-      // 3. Si no viene en URL, verificar exhaustivamente en sessionStorage y localStorage
-      const tokenFromSession = extractTokenFromStorage(sessionStorage);
-      if (tokenFromSession) {
-        return saveAuthToken(tokenFromSession);
-      }
-
-      const tokenFromLocal = extractTokenFromStorage(localStorage);
-      if (tokenFromLocal) {
-        return saveAuthToken(tokenFromLocal);
-      }
-    } catch {
-      // Ignorar errores de parsing y usar mock fallback
-    }
+  if (typeof window === "undefined") return null;
+  const fromUrl = adoptSessionFromUrl();
+  if (fromUrl) return fromUrl;
+  const stored = readStoredSession();
+  if (stored) return stored;
+  if (devFallbackEnabled()) {
+    return buildSession(DEV_FALLBACK_TOKEN);
   }
-  return getStoredSession();
+  return null;
 }
 
-/** Cognito está "configurado" en modo demo para que la UI use el flujo simulado. */
+/**
+ * Token que debe viajar en `Authorization: Bearer <token>`.
+ * Devuelve null si no hay access token válido; nunca devuelve un id_token.
+ */
+export function getAuthToken(): string | null {
+  if (typeof window === "undefined") return null;
+  const session = readAuthSession();
+  const token = cleanToken(session?.accessToken);
+  if (!token || isTokenExpired(token) || !isAccessToken(token)) return null;
+  return token;
+}
+
+/**
+ * Guarda un access token recibido manualmente o desde un handoff.
+ * `options.idToken` conserva el id_token real (grupos/identidad) sin
+ * sobrescribirlo con el access token.
+ */
+export function saveAuthToken(
+  rawToken: string,
+  options: {
+    idToken?: string;
+    name?: string;
+    email?: string;
+    role?: string;
+  } = {},
+): AuthSession {
+  const accessToken = cleanToken(rawToken);
+  if (!accessToken) {
+    throw new Error("El token JWT no puede estar vacío.");
+  }
+  if (!isAccessToken(accessToken)) {
+    throw new Error(
+      "El valor entregado es un id_token. El BFF requiere un access token de Cognito.",
+    );
+  }
+
+  const idToken = cleanToken(options.idToken);
+  const session = buildSession(
+    accessToken,
+    idToken && !isTokenExpired(idToken) ? idToken : undefined,
+    options,
+  );
+  persistAuthSession(session);
+  return session;
+}
+
+export function getStoredSession(): AuthSession | null {
+  return readStoredSession();
+}
+
+/** En el panel EC2 no hay login local: la sesión se origina en el sitio principal. */
 export function cognitoIsConfigured(): boolean {
   return true;
 }
 
-/** Reemplaza el intercambio real de tokens por la sesión simulada. */
+/**
+ * No se redirige al Hosted UI desde el panel. Si ya existe sesión se devuelve;
+ * de lo contrario se informa que debe iniciarse sesión desde el sitio principal.
+ */
 export async function beginCognitoSignIn(): Promise<AuthSession> {
-  // Sin redirect al Hosted UI de Cognito.
-  return getStoredSession();
+  const active = readAuthSession();
+  if (active) return active;
+  throw new Error(
+    "Este panel recibe la sesión desde el sitio principal. Inicia sesión allí y vuelve a abrir el entorno V1.",
+  );
 }
 
-/** No hay callback OAuth real; se limpia cualquier `?code` residual y se entra directo. */
+/** No hay callback OAuth local. Limpia un `?code` residual y devuelve la sesión adoptada. */
 export async function completeCognitoSignIn(): Promise<AuthSession | null> {
   if (typeof window !== "undefined") {
     const query = new URLSearchParams(window.location.search);
     if (query.has("code") || query.has("state")) {
-      window.history.replaceState({}, "", window.location.pathname);
+      query.delete("code");
+      query.delete("state");
+      const remaining = query.toString();
+      window.history.replaceState(
+        {},
+        "",
+        `${window.location.pathname}${remaining ? `?${remaining}` : ""}${window.location.hash}`,
+      );
     }
   }
-  return getStoredSession();
+  return readAuthSession();
 }
 
-/** Mantiene la compatibilidad con el flujo anterior de "modo demo". */
 export function createDemoSession(): AuthSession {
-  return getStoredSession();
+  if (process.env.NODE_ENV !== "development") {
+    throw new Error("El modo demo no está disponible en producción.");
+  }
+  const session = buildSession("demo-access-token", undefined, {
+    name: "Camila Muñoz",
+    email: "camila@agrocenter.cl",
+    role: "ADMIN",
+    groups: ["ADMIN"],
+  });
+  session.demo = true;
+  persistAuthSession(session);
+  return session;
 }
 
 export function isUserAdmin(session: AuthSession | null): boolean {
-  if (!session) return false;
-  if (session.demo) return true;
-  if (session.role?.toUpperCase() === "ADMIN" || session.role?.toUpperCase() === "ROLE_ADMIN") {
+  if (!session?.accessToken || session.demo) return false;
+  if (
+    session.role?.toUpperCase() === "ADMIN" ||
+    session.role?.toUpperCase() === "ROLE_ADMIN"
+  ) {
     return true;
   }
-  if (session.groups?.some((g) => g.toUpperCase() === "ADMIN" || g.toUpperCase() === "ROLE_ADMIN")) {
+  if (
+    session.groups?.some((group) => {
+      const value = group.toUpperCase();
+      return value === "ADMIN" || value === "ROLE_ADMIN";
+    })
+  ) {
     return true;
   }
-  const checkToken = (token?: string) => {
-    if (!token) return false;
-    const claims = decodeClaims(token);
-    const groups = Array.isArray(claims["cognito:groups"]) ? claims["cognito:groups"] : [];
-    return groups.some((g: unknown) => {
-      const val = String(g).toUpperCase();
-      return val === "ADMIN" || val === "ROLE_ADMIN";
-    });
-  };
-  return checkToken(session.idToken) || checkToken(session.accessToken);
+  return (
+    isAdminClaims(decodeClaims(session.idToken)) ||
+    isAdminClaims(decodeClaims(session.accessToken))
+  );
 }
 
 export function signOut() {
   if (typeof window === "undefined") return;
-
-  // Limpia cualquier token real que haya quedado de una sesión anterior.
-  sessionStorage.removeItem(SESSION_KEY);
-  sessionStorage.removeItem(VERIFIER_KEY);
-  sessionStorage.removeItem(STATE_KEY);
-  sessionStorage.removeItem(CONSUMED_CODE_KEY);
-  if (typeof localStorage !== "undefined") {
-    localStorage.removeItem(SESSION_KEY);
-    localStorage.removeItem(VERIFIER_KEY);
-    localStorage.removeItem(STATE_KEY);
-    localStorage.removeItem(CONSUMED_CODE_KEY);
-  }
-
-  // Sin redirect a `${domain}/logout`: el sitio estático no depende de Cognito.
-}
-
-function decodeClaims(token: string): Record<string, unknown> {
-  try {
-    const payload = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
-    return JSON.parse(decodeURIComponent(escape(atob(payload))));
-  } catch {
-    return {};
-  }
+  clearAuthStorage();
 }

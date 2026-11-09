@@ -106,6 +106,8 @@ public class SecurityConfig {
             patterns = List.of(
                     "https://front-web-seven.vercel.app",
                     "https://*.vercel.app",
+                    "http://44.195.118.58:3000",
+                    "http://34.195.64.174:3000",
                     "http://localhost:3000",
                     "http://localhost:5173"
             );

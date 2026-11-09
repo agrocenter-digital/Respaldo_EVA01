@@ -30,7 +30,7 @@ public class RestAuthenticationEntryPoint implements AuthenticationEntryPoint {
                 response,
                 HttpStatus.UNAUTHORIZED,
                 "UNAUTHORIZED",
-                "Se requiere un JWT Bearer valido y vigente"
+                "Se requiere Authorization: Bearer <access_token de Cognito valido y vigente>"
         );
     }
 }

@@ -33,7 +33,7 @@ import {
   XCircle,
   Key,
 } from "lucide-react";
-import { AuthSession, isUserAdmin, readAuthSession, saveAuthToken, getAuthToken, isTokenExpired } from "@/lib/cognito";
+import { AuthSession, adoptSessionFromUrl, isUserAdmin, readAuthSession, saveAuthToken, getAuthToken, isTokenExpired } from "@/lib/cognito";
 import { apiRequest, HttpError, API_BASE_URL } from "@/lib/api";
 
 type FeedbackAlert = {
@@ -267,7 +267,7 @@ const fallbackInitialPurchases: PurchaseAdmin[] = [
 ];
 
 export default function AdminPage() {
-  const [session, setSession] = useState<AuthSession | null>(() => readAuthSession());
+  const [session, setSession] = useState<AuthSession | null>(null);
   const [activeTab, setActiveTab] = useState<"inventory" | "sales" | "purchases" | "apis" | "console">("inventory");
 
   // Search & Filter State
@@ -321,7 +321,8 @@ export default function AdminPage() {
   const [copySuccess, setCopySuccess] = useState(false);
 
   useEffect(() => {
-    const currentSession = readAuthSession();
+    // Primero se adopta el access token propagado en la URL; luego storage.
+    const currentSession = adoptSessionFromUrl() ?? readAuthSession();
     setSession(currentSession);
     loadInventory(currentSession);
     loadSales();
